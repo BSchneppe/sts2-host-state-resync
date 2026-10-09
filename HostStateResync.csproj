@@ -7,6 +7,9 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <LangVersion>latest</LangVersion>
+    <!-- Game version the reference assemblies stand in for when no game is installed (CI). The mod patches
+         private internals, so this is the version it was written against, not a compatibility range. -->
+    <RefAssembliesVersion Condition="'$(RefAssembliesVersion)' == ''">0.111.0-beta-41cef1ea</RefAssembliesVersion>
 
     <!-- Override with: dotnet build -p:STS2GameDir=... -p:STS2ModsDir=... -->
     <STS2GameDir Condition="'$(STS2GameDir)' == '' And '$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::OSX)))' == 'true'">$(HOME)/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64</STS2GameDir>
@@ -18,6 +21,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- CI / no game install: reference assemblies from NuGet -->
+    <PackageReference Include="BSchneppe.Sts2.ReferenceAssemblies" Version="$(RefAssembliesVersion)"
+                      Condition="!Exists('$(STS2GameDir)/sts2.dll')"
+                      PrivateAssets="All" />
+  </ItemGroup>
+
+  <!-- Local dev: the real game DLLs -->
+  <ItemGroup Condition="Exists('$(STS2GameDir)/sts2.dll')">
     <Reference Include="sts2">
       <HintPath>$(STS2GameDir)/sts2.dll</HintPath>
       <Private>false</Private>
@@ -30,6 +41,13 @@
       <HintPath>$(STS2GameDir)/GodotSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <!-- Keep the tooling projects out of the Godot SDK's auto-globbing -->
+  <ItemGroup>
+    <Compile Remove="tools/**" />
+    <None Remove="tools/**" />
+    <EmbeddedResource Remove="tools/**" />
   </ItemGroup>
 
   <Target Name="CopyModFiles" AfterTargets="Build" Condition="Exists('$(STS2ModsDir)')">

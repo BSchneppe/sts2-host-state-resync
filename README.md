@@ -1,3 +1,5 @@
+[![Build](https://github.com/BSchneppe/sts2-host-state-resync/actions/workflows/build.yml/badge.svg)](https://github.com/BSchneppe/sts2-host-state-resync/actions/workflows/build.yml)
+
 # Host State Resync (Slay the Spire 2 mod)
 
 When co-op detects a state divergence, vanilla kicks the client back to the main menu with a
@@ -118,15 +120,45 @@ and re-keys cards by ID. The new message changes the game's message numbering, w
 version was bumped: the join check compares gameplay mods by `id-version`, so mixed builds refuse to
 connect instead of misreading each other's messages.
 
-## Install / build
+## Installation
+
+Every player in the run needs the same version: the game compares gameplay mods by id and version
+when someone joins.
+
+1. Download `HostStateResync-vX.Y.Z.zip` from [Releases](../../releases)
+2. Unzip it into `Slay the Spire 2/mods/`, so the files end up in `mods/HostStateResync/`
+3. Launch the game and enable the mod in the Mods menu
+
+## Building from source
+
+Requires the [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0).
 
 ```bash
-dotnet build -c Debug
+dotnet build -c Release   # what Releases and the Workshop ship
+dotnet build -c Debug     # adds the hsr test command (see Testing)
 ```
 
-On this machine `DOTNET_ROOT=$HOME/.dotnet` is needed. The build copies `HostStateResync.dll` and
-`HostStateResync.json` into the game's `mods/HostStateResync/` folder (path overridable with
-`-p:STS2ModsDir=...`). Give the same folder to every other player.
+With Slay the Spire 2 installed, the build references `sts2.dll`, `0Harmony.dll` and `GodotSharp.dll`
+from the game and copies `HostStateResync.dll` and `HostStateResync.json` into
+`mods/HostStateResync/`. The paths are auto-detected on macOS, Windows and Linux; override them with
+`-p:STS2GameDir=/path/to/game/data -p:STS2ModsDir=/path/to/mods`. Without a game install (CI), the
+build uses the `BSchneppe.Sts2.ReferenceAssemblies` NuGet package for the version in
+`RefAssembliesVersion`.
+
+`tools/PatchAudit` checks that every Harmony patch target still exists. CI runs it against the
+reference assemblies, which only carry public members, so the private targets are exempted there;
+against an installed game it checks them all:
+
+```bash
+dotnet run --project tools/PatchAudit -- . "<game data dir>/sts2.dll"
+```
+
+## Publishing
+
+- **GitHub Release:** push a tag `vX.Y.Z` that matches the version in `HostStateResync.json`. The
+  Release workflow builds Release, audits the patch targets and attaches `HostStateResync-vX.Y.Z.zip`.
+- **Steam Workshop:** `STEAM_USER=<account> ./publish.sh "change note"` builds Release and uploads it
+  with steamcmd. The first run creates a private item and saves its ID to `.workshop_id`.
 
 ## Verifying it works
 

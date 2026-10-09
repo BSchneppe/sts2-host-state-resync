@@ -1,0 +1,70 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+env:
+  BUILD_REF_ASSEMBLIES: '0.111.0-beta-41cef1ea'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Restore dependencies
+        run: dotnet restore -p:RefAssembliesVersion=${{ env.BUILD_REF_ASSEMBLIES }}
+      - name: Build
+        run: dotnet build -c Release --no-restore -p:RefAssembliesVersion=${{ env.BUILD_REF_ASSEMBLIES }}
+
+      # Refuse to ship a build whose patch targets have gone stale.
+      - name: Audit Harmony patch targets
+        run: |
+          dotnet run --project tools/PatchAudit -- . \
+            ~/.nuget/packages/bschneppe.sts2.referenceassemblies/${{ env.BUILD_REF_ASSEMBLIES }}/ref/net9.0/sts2.dll \
+            --allow-missing ChecksumTracker.OnReceivedStateDivergenceMessage \
+            --allow-missing ChecksumTracker.CompareChecksums \
+            --allow-missing RunManager.StateDiverged
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: .godot/mono/temp/bin/Release/HostStateResync.dll
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      # The tag and the manifest must agree: the game's join check compares gameplay mods by
+      # id-version, so a release whose manifest kept the old version would pair with the wrong peers.
+      - name: Check manifest version matches tag
+        run: |
+          manifest="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' HostStateResync.json | sed -E 's/.*"(v?[^"]+)"$/\1/')"
+          [ "$manifest" = "$GITHUB_REF_NAME" ] || { echo "HostStateResync.json says $manifest, tag is $GITHUB_REF_NAME"; exit 1; }
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: artifacts
+      - name: Package
+        run: |
+          mkdir -p release/HostStateResync
+          cp artifacts/HostStateResync.dll release/HostStateResync/
+          cp HostStateResync.json release/HostStateResync/
+          cd release
+          zip -r ../HostStateResync-v${{ steps.version.outputs.version }}.zip HostStateResync
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: HostStateResync-v${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false

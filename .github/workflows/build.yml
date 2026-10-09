@@ -1,0 +1,41 @@
+name: Build Mod
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The mod patches private ChecksumTracker/RunManager internals and reads private fields by name,
+        # so it is built and audited against exactly the game versions it claims to support.
+        ref-assemblies:
+          - '0.111.0-beta-41cef1ea'
+    name: Build (ref ${{ matrix.ref-assemblies }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Restore dependencies
+        run: dotnet restore -p:RefAssembliesVersion=${{ matrix.ref-assemblies }}
+      - name: Build (Release)
+        run: dotnet build -c Release --no-restore -p:RefAssembliesVersion=${{ matrix.ref-assemblies }}
+      # Debug compiles the `hsr` test command, which Release leaves out.
+      - name: Build (Debug)
+        run: dotnet build -c Debug --no-restore -p:RefAssembliesVersion=${{ matrix.ref-assemblies }}
+
+      # Compiling is not enough: Harmony binds patch targets by name at runtime. This checks every
+      # [HarmonyPatch] target type exists and declares the member. Reference assemblies keep only the
+      # public surface, so the private targets are exempted here and checked by the patch-time log line
+      # ("HostStateResync initialized") in game instead.
+      - name: Audit Harmony patch targets
+        run: |
+          dotnet run --project tools/PatchAudit -- . \
+            ~/.nuget/packages/bschneppe.sts2.referenceassemblies/${{ matrix.ref-assemblies }}/ref/net9.0/sts2.dll \
+            --allow-missing ChecksumTracker.OnReceivedStateDivergenceMessage \
+            --allow-missing ChecksumTracker.CompareChecksums \
+            --allow-missing RunManager.StateDiverged

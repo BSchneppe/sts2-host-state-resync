@@ -1,4 +1,23 @@
+# Build output
 bin/
 obj/
+packages/
+build/
+
+# Godot
 .godot/
+*.pck
+
+# Local mod bundles (Debug builds with the hsr test command); releases come from CI
+dist/
+*.zip
+
+# IDE
+.idea/
 *.user
+*.suo
+*.DotSettings.user
+
+# OS
+.DS_Store
+Thumbs.db
