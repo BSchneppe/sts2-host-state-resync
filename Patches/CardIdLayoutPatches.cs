@@ -23,6 +23,7 @@ public static class ChecksumTrackerCtorPatch
         try
         {
             CardIdLayouts.Clear();
+            DivergenceStrikes.Clear();
             __instance.ChecksumGenerated += (data, _, _) => Record(data, runState);
             netService.RegisterMessageHandler(Handler);
         }

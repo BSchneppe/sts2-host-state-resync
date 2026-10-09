@@ -113,6 +113,7 @@ public static class OnReceivedStateDivergenceMessagePatch
                 if (kick)
                 {
                     (netService as NetHostGameService)?.DisconnectClient(senderId, NetError.StateDivergence);
+                    DivergenceStrikes.Forget(senderId);
                 }
                 else
                 {
@@ -252,6 +253,12 @@ public static class DivergenceStrikes
         Strikes[clientId] = n;
         return n;
     }
+
+    /// <summary>A new run starts every client from zero; strikes from the last run say nothing about this one.</summary>
+    public static void Clear() => Strikes.Clear();
+
+    /// <summary>The client was kicked; if it rejoins, it starts from zero.</summary>
+    public static void Forget(ulong clientId) => Strikes.Remove(clientId);
 
     public static string Describe() => Strikes.Count == 0 ? "none" : string.Join(", ", Strikes.Select(kv => $"{kv.Key}: {kv.Value}"));
 
