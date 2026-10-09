@@ -137,6 +137,13 @@ public static class OnReceivedStateDivergenceMessagePatch
 
             // Client: heal ourselves from the host's snapshot.
             var baseState = index >= 0 ? TrackedFullStateField!.GetValue(local) as NetFullCombatState : null;
+            if (baseState == null)
+            {
+                // Without our own snapshot of that checkpoint there is nothing to merge against: the host values are
+                // 20+ checkpoints old by now. The next divergence still in our history repairs it properly.
+                MainFile.Logger.Warn($"No local snapshot for checksum #{id} any more; skipping this resync");
+                return false;
+            }
             var runState = RunManager.Instance.DebugOnlyGetState();
             if (runState == null)
             {
