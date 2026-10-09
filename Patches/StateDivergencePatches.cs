@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using HostStateResync.Resync;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -82,6 +83,14 @@ public static class OnReceivedStateDivergenceMessagePatch
                 }
             }
 
+            // A resync already applied makes every checkpoint taken before it stale: their snapshots still carry the
+            // drift, so merging them would subtract it a second time, and each echo would cost the client a strike.
+            if (netService.Type == NetGameType.Client && id < ResyncFence.Of(__instance))
+            {
+                MainFile.Logger.Info($"Ignoring divergence #{id}: it predates the resync applied before checksum #{ResyncFence.Of(__instance)}");
+                return false;
+            }
+
             bool kick = false;
             committed = true;
             if (netService.Type == NetGameType.Host)
@@ -137,6 +146,10 @@ public static class OnReceivedStateDivergenceMessagePatch
 
             var result = HostStateApplier.Apply(runState, message.senderCombatState, baseState, id,
                 CardIdLayouts.TakeFromHost(id), CardIdLayouts.GetLocal(id));
+            if (result.FixedCount > 0)
+            {
+                ResyncFence.Set(__instance, __instance.NextId);
+            }
 #if DEBUG
             Testing.HsrConsoleCmd.LastResult = result;
 #endif
@@ -278,4 +291,18 @@ public static class DivergenceStrikes
             MainFile.Logger.Info($"Client {clientId} produced a matching checksum again; divergence strikes reset");
         }
     }
+}
+
+/// <summary>
+/// Client only: the first checksum ID generated after the last resync that changed anything. Divergence messages for
+/// earlier IDs describe the state before that resync. Kept per <see cref="ChecksumTracker"/>, because every run gets a
+/// new tracker whose IDs start at 0 again.
+/// </summary>
+public static class ResyncFence
+{
+    private static readonly ConditionalWeakTable<ChecksumTracker, StrongBox<uint>> Fences = new();
+
+    public static uint Of(ChecksumTracker tracker) => Fences.TryGetValue(tracker, out var box) ? box.Value : 0;
+
+    public static void Set(ChecksumTracker tracker, uint nextId) => Fences.AddOrUpdate(tracker, new StrongBox<uint>(nextId));
 }
