@@ -274,7 +274,7 @@ public static class HostStateApplier
 
         if (hostInCombat)
         {
-            ApplyPiles(run, player, combat, host, baseP, ids, who, result);
+            ApplyPiles(player, combat, host, baseP, ids, who, result);
         }
 
         ApplyOrbs(player, combat, host, baseP, who, result);
@@ -443,9 +443,15 @@ public static class HostStateApplier
 
     // ----------------------------------------------------------------- piles
 
-    private static void ApplyPiles(RunState run, Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, string who, ResyncResult result)
+    private static void ApplyPiles(Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, string who, ResyncResult result)
     {
         var localPiles = combat.AllPiles.Where(p => p.IsCombatPile).ToList();
+        var combatScope = player.Creature.CombatState;
+        if (combatScope == null)
+        {
+            result.Skip($"{who} card piles", "no combat state to own created cards");
+            return;
+        }
         var localNow = localPiles.Select(NetFullCombatState.CombatPileState.From).ToList();
         // Equal values are not enough: identical cards can still hold each other's IDs (see CardIdLayout).
         bool idsMatch = ids.Host == null || ids.Now.SamePlacement(ids.Host.Value, player.NetId);
@@ -502,7 +508,9 @@ public static class HostStateApplier
                 if (match == null)
                 {
                     match = CardModel.FromSerializable(hostCard.card);
-                    run.AddCard(match, player);
+                    // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for an
+                    // in-combat card the CombatState does not contain, so a run-scoped card would break on its next draw.
+                    combatScope.AddCard(match, player);
                     created++;
                 }
                 else if (hostId != CardIdLayout.NoId && match != holder)
@@ -526,10 +534,6 @@ public static class HostStateApplier
             {
                 pile.RemoveInternal(card, silent: true);
             }
-        }
-        foreach (var leftover in pool)
-        {
-            run.RemoveCard(leftover);
         }
         foreach (var (pile, cards) in assignments)
         {

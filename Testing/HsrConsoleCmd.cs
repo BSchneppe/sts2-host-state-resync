@@ -74,12 +74,12 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             foreach (var c in cards) pile.AddInternal(c, -1, silent: true);
             pile.InvokeContentsChanged();
         },
-        ["card"] = (run, p) =>
+        ["card"] = (_, p) =>
         {
             var hand = p.PlayerCombatState!.Hand;
             var canonical = ModelDb.AllCards.First(c => c.Id.Entry == "STRIKE" || c.Id.Entry.StartsWith("STRIKE"));
             var card = canonical.ToMutable();
-            run.AddCard(card, p);
+            p.Creature.CombatState!.AddCard(card, p);
             hand.AddInternal(card, -1, silent: true);
             hand.InvokeContentsChanged();
         },
