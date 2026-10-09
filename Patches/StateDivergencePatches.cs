@@ -62,6 +62,9 @@ public static class OnReceivedStateDivergenceMessagePatch
             return true;
         }
 
+        // Everything before the first strike or the vanilla logging is read-only. After that, handing over to
+        // vanilla would run those side effects a second time (another echo, another strike, a kick on the host).
+        bool committed = false;
         try
         {
             uint id = message.senderChecksum.id;
@@ -80,6 +83,7 @@ public static class OnReceivedStateDivergenceMessagePatch
             }
 
             bool kick = false;
+            committed = true;
             if (netService.Type == NetGameType.Host)
             {
                 int strikes = DivergenceStrikes.Record(senderId);
@@ -142,6 +146,11 @@ public static class OnReceivedStateDivergenceMessagePatch
         }
         catch (Exception e)
         {
+            if (committed)
+            {
+                MainFile.Logger.Error($"Resync handling failed after the divergence was already handled: {e}");
+                return false;
+            }
             MainFile.Logger.Warn($"Resync handling failed, falling back to vanilla: {e}");
             return true;
         }
