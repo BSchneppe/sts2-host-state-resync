@@ -129,7 +129,9 @@ public struct PileCardIds : IPacketSerializable
     {
         pileType = (PileType)reader.ReadInt();
         int count = reader.ReadInt();
-        ids = new List<uint>(count);
+        // No pre-allocation from a count read off the wire (vanilla ReadList does not either): a corrupt or
+        // hostile packet would ask for gigabytes. A count past the packet end fails in ReadUInt instead.
+        ids = new List<uint>();
         for (int i = 0; i < count; i++) ids.Add(reader.ReadUInt());
     }
 }
