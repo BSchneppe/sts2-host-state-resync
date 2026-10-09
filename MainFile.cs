@@ -15,15 +15,20 @@ public partial class MainFile : Node
 
     public static void Initialize()
     {
+        var harmony = new Harmony(ModId);
         try
         {
-            new Harmony(ModId).PatchAll(typeof(MainFile).Assembly);
+            harmony.PatchAll(typeof(MainFile).Assembly);
             Logger.Info($"{ModId} initialized: divergent clients are resynced from the host instead of disconnected " +
                         $"(max {Settings.MaxConsecutiveStrikes} consecutive unhealed divergences before falling back to a kick)");
         }
         catch (Exception e)
         {
-            Logger.Warn($"{ModId} failed to patch: {e}");
+            // PatchAll stops at the first target it cannot resolve, leaving the earlier patches applied. A partial
+            // set is worse than none (say, the client stays connected but the host still shows the error popup),
+            // so take them all back out and leave the game to its vanilla behaviour.
+            harmony.UnpatchAll(ModId);
+            Logger.Error($"{ModId} failed to patch, so it is disabled and divergences are handled as in vanilla: {e}");
         }
     }
 }
