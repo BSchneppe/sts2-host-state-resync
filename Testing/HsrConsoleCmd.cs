@@ -182,6 +182,23 @@ public class HsrConsoleCmd : AbstractConsoleCmd
         }
     }
 
+    private static readonly string[] Subcommands = { "selftest", "desync", "list", "status" };
+
+    /// <summary>Tab completion: the subcommand first, then the drift kind after <c>desync</c> or <c>selftest</c>.</summary>
+    public override CompletionResult GetArgumentCompletions(Player? player, string[] args)
+    {
+        if (args.Length <= 1)
+        {
+            return CompleteArgument(Subcommands, Array.Empty<string>(), args.FirstOrDefault() ?? "", CompletionType.Subcommand);
+        }
+        if (args.Length == 2 && (args[0].Equals("desync", StringComparison.OrdinalIgnoreCase) ||
+                                 args[0].Equals("selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            return CompleteArgument(Perturbations.Keys.OrderBy(k => k), new[] { args[0] }, args[1]);
+        }
+        return new CompletionResult { Type = CompletionType.Argument, ArgumentContext = CmdName };
+    }
+
     private static (RunState run, Player me) RequireCombat(Player? issuingPlayer)
     {
         var run = RunManager.Instance.DebugOnlyGetState() ?? throw new InvalidOperationException("only works during a run");

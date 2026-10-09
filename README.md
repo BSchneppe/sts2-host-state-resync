@@ -152,7 +152,7 @@ choice ids, two identical cards swapping places), snapshots that as the client's
 `ChecksumTracker.GenerateChecksum` AND that every combat card ID is back in its slot (`CardIdLayout`). The checksum
 alone passed the broken v0.1.0 shuffle repair. A final scenario adds a lockstep action after the checkpoint (+1
 energy) and checks the three-way merge keeps it. `hsr selftest energy` runs one scenario; failures print a line diff
-of the two state dumps and of the two ID layouts.
+of the two state dumps and of the two ID layouts. Subcommands and drift kinds tab-complete in the console.
 
 **Real second player, local ENet: `tools/localmp.sh`.** The game ships a developer shortcut: `--fastmp=host_standard`
 hosts over ENet on `127.0.0.1:33771` without Steam, `--fastmp=join --clientId=1001` joins it. The script launches
