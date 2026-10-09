@@ -1,0 +1,275 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using HarmonyLib;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Multiplayer.Serialization;
+using MegaCrit.Sts2.Core.Multiplayer.Transport;
+using MegaCrit.Sts2.Core.Runs;
+
+namespace HostStateResync.Resync;
+
+/// <summary>
+/// Which combat card ID sits at which position of every combat pile, plus the next ID to be handed out.
+///
+/// The network refers to a card by its combat ID (<see cref="NetCombatCardDb"/>), not by what it is: a played card
+/// travels as "card 23", and the host cancels the play without a word if its card 23 is not in hand. The checksum and
+/// <c>NetFullCombatState</c> only see card values, so two unupgraded Strikes look identical to them. Rebuilding piles
+/// from the host's snapshot by value can therefore produce piles that hash the same while the IDs sit in different
+/// places, and the next play of one of those cards desyncs for real. This layout is what the snapshot leaves out.
+/// </summary>
+public struct CardIdLayout : IPacketSerializable
+{
+    public const uint NoId = uint.MaxValue;
+
+    public uint nextId;
+    public List<PlayerCardIds> players;
+
+    public void Serialize(PacketWriter writer)
+    {
+        writer.WriteUInt(nextId);
+        writer.WriteList(players ?? new List<PlayerCardIds>());
+    }
+
+    public void Deserialize(PacketReader reader)
+    {
+        nextId = reader.ReadUInt();
+        players = reader.ReadList<PlayerCardIds>();
+    }
+
+    public List<uint>? IdsOf(ulong playerId, PileType pileType)
+    {
+        foreach (var p in players ?? new List<PlayerCardIds>())
+        {
+            if (p.playerId != playerId) continue;
+            foreach (var pile in p.piles ?? new List<PileCardIds>())
+            {
+                if (pile.pileType == pileType) return pile.ids;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The same IDs in the same piles in the same order (the next ID is compared separately).</summary>
+    public bool SamePlacement(CardIdLayout other, ulong playerId)
+    {
+        var mine = (players ?? new List<PlayerCardIds>()).FirstOrDefault(p => p.playerId == playerId).piles ?? new List<PileCardIds>();
+        var theirs = (other.players ?? new List<PlayerCardIds>()).FirstOrDefault(p => p.playerId == playerId).piles ?? new List<PileCardIds>();
+        if (mine.Count != theirs.Count) return false;
+        foreach (var pile in mine)
+        {
+            var match = theirs.FirstOrDefault(t => t.pileType == pile.pileType);
+            if (match.ids == null || !match.ids.SequenceEqual(pile.ids)) return false;
+        }
+        return true;
+    }
+
+    public static CardIdLayout Capture(RunState run)
+    {
+        var db = NetCombatCardDb.Instance;
+        var layout = new CardIdLayout { nextId = CardIdDb.NextId ?? 0, players = new List<PlayerCardIds>() };
+        foreach (var player in run.Players)
+        {
+            var combat = player.PlayerCombatState;
+            if (combat == null) continue;
+            var piles = new List<PileCardIds>();
+            foreach (var pile in combat.AllPiles.Where(p => p.IsCombatPile))
+            {
+                piles.Add(new PileCardIds
+                {
+                    pileType = pile.Type,
+                    ids = pile.Cards.Select(c => db.TryGetCardId(c, out var id) ? id : NoId).ToList(),
+                });
+            }
+            layout.players.Add(new PlayerCardIds { playerId = player.NetId, piles = piles });
+        }
+        return layout;
+    }
+
+    public override string ToString() =>
+        $"next {nextId}; " + string.Join("; ", (players ?? new List<PlayerCardIds>()).Select(p =>
+            $"{p.playerId}: " + string.Join(" ", (p.piles ?? new List<PileCardIds>()).Select(pile => $"{pile.pileType}[{string.Join(",", pile.ids)}]"))));
+}
+
+public struct PlayerCardIds : IPacketSerializable
+{
+    public ulong playerId;
+    public List<PileCardIds> piles;
+
+    public void Serialize(PacketWriter writer)
+    {
+        writer.WriteULong(playerId);
+        writer.WriteList(piles ?? new List<PileCardIds>());
+    }
+
+    public void Deserialize(PacketReader reader)
+    {
+        playerId = reader.ReadULong();
+        piles = reader.ReadList<PileCardIds>();
+    }
+}
+
+public struct PileCardIds : IPacketSerializable
+{
+    public PileType pileType;
+    public List<uint> ids;
+
+    public void Serialize(PacketWriter writer)
+    {
+        writer.WriteInt((int)pileType);
+        writer.WriteInt(ids?.Count ?? 0);
+        foreach (var id in ids ?? new List<uint>()) writer.WriteUInt(id);
+    }
+
+    public void Deserialize(PacketReader reader)
+    {
+        pileType = (PileType)reader.ReadInt();
+        int count = reader.ReadInt();
+        ids = new List<uint>(count);
+        for (int i = 0; i < count; i++) ids.Add(reader.ReadUInt());
+    }
+}
+
+/// <summary>
+/// Host to client, sent right before the vanilla <c>StateDivergenceMessage</c> for the same checksum: the host's
+/// <see cref="CardIdLayout"/> at that checksum. Both go out on the reliable channel, so this one arrives first.
+/// The game registers mod message types itself (<c>MessageTypes.Initialize</c>), so every peer needs this build.
+/// </summary>
+public struct HsrCardIdLayoutMessage : INetMessage
+{
+    public uint checksumId;
+    public CardIdLayout layout;
+
+    public bool ShouldBroadcast => false;
+    public NetTransferMode Mode => NetTransferMode.Reliable;
+    public LogLevel LogLevel => LogLevel.Info;
+    public bool ShouldBuffer => true;
+
+    public void Serialize(PacketWriter writer)
+    {
+        writer.WriteUInt(checksumId);
+        writer.Write(layout);
+    }
+
+    public void Deserialize(PacketReader reader)
+    {
+        checksumId = reader.ReadUInt();
+        layout = reader.Read<CardIdLayout>();
+    }
+}
+
+/// <summary>
+/// Layouts by checksum ID: our own, recorded at every checkpoint (the host sends these; the client uses its own as the
+/// base of the three-way merge), and the host's, as received by the client.
+/// </summary>
+public static class CardIdLayouts
+{
+    // ChecksumTracker keeps its last 20 snapshots; a little more slack costs nothing.
+    private const int Keep = 32;
+
+    private static readonly Dictionary<uint, CardIdLayout> Local = new();
+    private static readonly Dictionary<uint, CardIdLayout> FromHost = new();
+
+    public static void Clear()
+    {
+        Local.Clear();
+        FromHost.Clear();
+    }
+
+    public static void RecordLocal(uint checksumId, RunState run) => Put(Local, checksumId, CardIdLayout.Capture(run));
+
+    public static void ReceiveFromHost(uint checksumId, CardIdLayout layout) => Put(FromHost, checksumId, layout);
+
+    public static CardIdLayout? GetLocal(uint checksumId) => Local.TryGetValue(checksumId, out var l) ? l : null;
+
+    public static CardIdLayout? TakeFromHost(uint checksumId) => FromHost.Remove(checksumId, out var l) ? l : null;
+
+    private static void Put(Dictionary<uint, CardIdLayout> map, uint id, CardIdLayout layout)
+    {
+        map[id] = layout;
+        if (map.Count > Keep)
+        {
+            foreach (var old in map.Keys.Where(k => k + Keep < id).ToList()) map.Remove(old);
+        }
+    }
+}
+
+/// <summary>
+/// Reflection access to <see cref="NetCombatCardDb"/>'s private maps, for putting IDs back where the host has them.
+/// </summary>
+public static class CardIdDb
+{
+    private static readonly FieldInfo? NextIdField = AccessTools.Field(typeof(NetCombatCardDb), "_nextId");
+    private static readonly FieldInfo? IdToCardField = AccessTools.Field(typeof(NetCombatCardDb), "_idToCard");
+    private static readonly FieldInfo? CardToIdField = AccessTools.Field(typeof(NetCombatCardDb), "_cardToId");
+
+    public static bool Available => NextIdField != null && IdToCardField != null && CardToIdField != null;
+
+    public static uint? NextId => NextIdField?.GetValue(NetCombatCardDb.Instance) as uint?;
+
+    /// <summary>
+    /// Rewrites the ID map: <paramref name="assign"/> gives cards the host's IDs, <paramref name="forget"/> drops cards
+    /// that left combat, IDs handed out locally since the checkpoint shift by <paramref name="shift"/> (they belong to
+    /// cards the host will create later and number from its own counter), and the counter becomes
+    /// <paramref name="nextId"/>. All-or-nothing: on a clash the map is left untouched and the reason returned.
+    /// </summary>
+    public static string? Rewrite(IReadOnlyList<(CardModel card, uint id)> assign, IReadOnlyCollection<CardModel> forget,
+        uint shiftFrom, long shift, uint nextId, out int changed)
+    {
+        changed = 0;
+        if (!Available) return "NetCombatCardDb internals changed";
+
+        var db = NetCombatCardDb.Instance;
+        var cardToId = (Dictionary<CardModel, uint>)CardToIdField!.GetValue(db)!;
+        var idToCard = (Dictionary<uint, CardModel>)IdToCardField!.GetValue(db)!;
+
+        var next = new Dictionary<CardModel, uint>(cardToId);
+        foreach (var card in forget) next.Remove(card);
+        var assigned = new HashSet<CardModel>();
+        foreach (var (card, id) in assign)
+        {
+            next[card] = id;
+            assigned.Add(card);
+        }
+        if (shift != 0)
+        {
+            foreach (var card in next.Keys.ToList())
+            {
+                if (!assigned.Contains(card) && next[card] >= shiftFrom && next[card] != CardIdLayout.NoId)
+                {
+                    next[card] = (uint)(next[card] + shift);
+                }
+            }
+        }
+
+        var byId = new Dictionary<uint, CardModel>();
+        foreach (var (card, id) in next)
+        {
+            if (byId.TryGetValue(id, out var other))
+            {
+                return $"ID {id} would belong to both {other} and {card}";
+            }
+            byId[id] = card;
+        }
+        uint floor = byId.Count == 0 ? 0 : byId.Keys.Max() + 1;
+        if (nextId < floor) nextId = floor;
+
+        foreach (var (card, id) in next)
+        {
+            if (!cardToId.TryGetValue(card, out var old) || old != id) changed++;
+        }
+        cardToId.Clear();
+        idToCard.Clear();
+        foreach (var (card, id) in next)
+        {
+            cardToId[card] = id;
+            idToCard[id] = card;
+        }
+        NextIdField!.SetValue(db, nextId);
+        return null;
+    }
+}

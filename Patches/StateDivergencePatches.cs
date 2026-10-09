@@ -130,7 +130,8 @@ public static class OnReceivedStateDivergenceMessagePatch
                 return false;
             }
 
-            var result = HostStateApplier.Apply(runState, message.senderCombatState, baseState, id);
+            var result = HostStateApplier.Apply(runState, message.senderCombatState, baseState, id,
+                CardIdLayouts.TakeFromHost(id), CardIdLayouts.GetLocal(id));
 #if DEBUG
             Testing.HsrConsoleCmd.LastResult = result;
 #endif
@@ -156,6 +157,39 @@ public static class CompareChecksumsPatch
 {
     private static readonly Type? TrackedChecksumType = AccessTools.Inner(typeof(ChecksumTracker), "TrackedChecksum");
     private static readonly FieldInfo? TrackedDataField = TrackedChecksumType != null ? AccessTools.Field(TrackedChecksumType, "data") : null;
+    private static readonly FieldInfo? NetServiceField = AccessTools.Field(typeof(ChecksumTracker), "_netService");
+
+    /// <summary>
+    /// On a mismatch, send the client our card IDs at that checksum before vanilla sends the
+    /// <see cref="StateDivergenceMessage"/>; same reliable channel, so they arrive in that order.
+    /// </summary>
+    public static void Prefix(ChecksumTracker __instance, object localChecksum, NetChecksumData remoteChecksum, ulong remoteId)
+    {
+        try
+        {
+            if (TrackedDataField == null || NetServiceField?.GetValue(__instance) is not INetGameService netService ||
+                netService.Type != NetGameType.Host)
+            {
+                return;
+            }
+            var local = (NetChecksumData)TrackedDataField.GetValue(localChecksum)!;
+            if (local.id != remoteChecksum.id || local.checksum == remoteChecksum.checksum)
+            {
+                return;
+            }
+            var layout = CardIdLayouts.GetLocal(local.id);
+            if (layout == null)
+            {
+                MainFile.Logger.Warn($"No card ID layout recorded for checksum #{local.id}; client {remoteId} will rebuild piles by value");
+                return;
+            }
+            netService.SendMessage(new HsrCardIdLayoutMessage { checksumId = local.id, layout = layout.Value }, remoteId);
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Could not send card ID layout: {e.Message}");
+        }
+    }
 
     public static void Postfix(object localChecksum, NetChecksumData remoteChecksum, ulong remoteId)
     {

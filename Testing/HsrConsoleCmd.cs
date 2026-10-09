@@ -110,6 +110,34 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             var sync = RunManager.Instance.PlayerChoiceSynchronizer;
             sync.FastForwardChoiceIds(sync.ChoiceIds.Select(id => id + 1).ToList());
         },
+        // Two identical cards trade places: the checksum cannot see it, but the next play of either names a card that
+        // is somewhere else on the host. This is what a value-only pile rebuild used to leave behind.
+        ["swapids"] = (_, p) =>
+        {
+            var slots = p.PlayerCombatState!.AllPiles.Where(x => x.IsCombatPile)
+                .SelectMany(pile => pile.Cards.Select((card, index) => (pile, card, index))).ToList();
+            var pair = slots.SelectMany((a, i) => slots.Skip(i + 1).Where(b =>
+                    b.card.Id == a.card.Id && b.card.CurrentUpgradeLevel == a.card.CurrentUpgradeLevel &&
+                    (b.pile != a.pile || b.index != a.index))
+                .Select(b => (a, b))).FirstOrDefault();
+            if (pair.a.card == null) throw new InvalidOperationException("need two identical cards in combat piles");
+            var (x, y) = pair;
+            x.pile.RemoveInternal(x.card, silent: true);
+            y.pile.RemoveInternal(y.card, silent: true);
+            if (x.pile == y.pile)
+            {
+                // Same pile: re-insert in index order so the earlier slot is filled first.
+                x.pile.AddInternal(y.card, x.index, silent: true);
+                x.pile.AddInternal(x.card, y.index, silent: true);
+            }
+            else
+            {
+                x.pile.AddInternal(y.card, x.index, silent: true);
+                y.pile.AddInternal(x.card, y.index, silent: true);
+            }
+            x.pile.InvokeContentsChanged();
+            if (y.pile != x.pile) y.pile.InvokeContentsChanged();
+        },
     };
 
     public override CmdResult Process(Player? issuingPlayer, string[] args)
@@ -187,23 +215,37 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             try
             {
                 var truth = NetFullCombatState.FromRun(run, null);
+                var truthIds = CardIdLayout.Capture(run);
                 perturb(run, me);
                 var drifted = NetFullCombatState.FromRun(run, null);
-                if (tracker.GenerateChecksum(truth) == tracker.GenerateChecksum(drifted))
+                var driftedIds = CardIdLayout.Capture(run);
+                if (tracker.GenerateChecksum(truth) == tracker.GenerateChecksum(drifted) && SameIds(run, truthIds, driftedIds))
                 {
-                    sb.AppendLine($"{name}: SKIP (perturbation did not change the checksum)");
+                    sb.AppendLine($"{name}: SKIP (perturbation changed neither the checksum nor the card IDs)");
                     continue;
                 }
 
-                var result = HostStateApplier.Apply(run, truth, drifted, fakeId++);
+                var result = HostStateApplier.Apply(run, truth, drifted, fakeId++, truthIds, driftedIds);
                 LastResult = result;
                 var after = NetFullCombatState.FromRun(run, null);
-                bool pass = tracker.GenerateChecksum(after) == tracker.GenerateChecksum(truth);
+                var afterIds = CardIdLayout.Capture(run);
+                bool sumOk = tracker.GenerateChecksum(after) == tracker.GenerateChecksum(truth);
+                bool idsOk = SameIds(run, truthIds, afterIds);
+                bool pass = sumOk && idsOk;
                 all &= pass;
-                sb.AppendLine($"{name}: {(pass ? "PASS" : "FAIL")} ({result.FixedCount} fix(es))");
-                if (!pass)
+                sb.AppendLine($"{name}: {(pass ? "PASS" : "FAIL")} ({result.FixedCount} fix(es)" +
+                              $"{(sumOk ? "" : ", checksum differs")}{(idsOk ? "" : ", card IDs differ")})");
+                if (!sumOk)
                 {
                     sb.AppendLine(Diff(truth.ToString(), after.ToString()));
+                }
+                if (!idsOk)
+                {
+                    sb.AppendLine($"    truth ids: {truthIds}");
+                    sb.AppendLine($"    after ids: {afterIds}");
+                }
+                if (!pass)
+                {
                     MainFile.Logger.Warn(result.ToLogString());
                 }
             }
@@ -220,11 +262,12 @@ public class HsrConsoleCmd : AbstractConsoleCmd
         {
             var combat = me.PlayerCombatState!;
             var truth = NetFullCombatState.FromRun(run, null);
+            var ids = CardIdLayout.Capture(run);
             combat.Energy += 3;
             var drifted = NetFullCombatState.FromRun(run, null);
             combat.Energy += 1;
             int expected = truth.Players.First(p => p.playerId == me.NetId).energy + 1;
-            HostStateApplier.Apply(run, truth, drifted, fakeId++);
+            HostStateApplier.Apply(run, truth, drifted, fakeId++, ids, ids);
             bool pass = combat.Energy == expected;
             all &= pass;
             sb.AppendLine($"energy-delta: {(pass ? "PASS" : "FAIL")} (energy {combat.Energy}, expected {expected})");
@@ -239,6 +282,9 @@ public class HsrConsoleCmd : AbstractConsoleCmd
         sb.Insert(0, $"hsr selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
         return (all, sb.ToString().TrimEnd());
     }
+
+    private static bool SameIds(RunState run, CardIdLayout a, CardIdLayout b) =>
+        a.nextId == b.nextId && run.Players.All(p => a.SamePlacement(b, p.NetId));
 
     private static string Diff(string a, string b)
     {

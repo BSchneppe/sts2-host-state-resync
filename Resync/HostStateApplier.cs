@@ -8,6 +8,7 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Random;
@@ -42,9 +43,18 @@ public static class HostStateApplier
     private static readonly Action<Creature, int>? SetMaxHp = MakeSetter<Creature, int>("MaxHp");
     private static readonly Action<Creature, int>? SetBlock = MakeSetter<Creature, int>("Block");
 
-    public static ResyncResult Apply(RunState run, NetFullCombatState host, NetFullCombatState? baseState, uint checksumId)
+    /// <param name="hostIds">The host's combat card IDs at the checksum, when its build sent them. Without them piles
+    /// are rebuilt by value only, which can leave identical cards holding each other's IDs.</param>
+    /// <param name="baseIds">Our own card IDs at the checksum, the base of the three-way merge for the ID counter.</param>
+    public static ResyncResult Apply(RunState run, NetFullCombatState host, NetFullCombatState? baseState, uint checksumId,
+        CardIdLayout? hostIds = null, CardIdLayout? baseIds = null)
     {
         var result = new ResyncResult(checksumId, baseState != null);
+        var ids = new IdPlan(hostIds, baseIds, CardIdLayout.Capture(run), CardIdDb.NextId);
+        if (hostIds == null)
+        {
+            result.Skip("card ids", "host sent no card ID layout; piles are matched by value only");
+        }
 
         Try(result, "run RNG", () => ApplyRunRng(run.Rng, host.Rng, baseState?.Rng, result));
         Try(result, "sync markers", () => ApplySyncMarkers(host, baseState, result));
@@ -59,10 +69,11 @@ public static class HostStateApplier
             }
             var basePlayer = FindPlayer(baseState, hostPlayer.playerId);
             var hp = hostPlayer;
-            Try(result, $"player {player.NetId}", () => ApplyPlayer(run, player, hp, basePlayer, result));
+            Try(result, $"player {player.NetId}", () => ApplyPlayer(run, player, hp, basePlayer, ids, result));
         }
 
         Try(result, "creatures", () => ApplyCreatures(run, host, baseState, result));
+        Try(result, "card ids", () => ApplyCardIds(ids, result));
         return result;
     }
 
@@ -176,7 +187,7 @@ public static class HostStateApplier
 
     // ---------------------------------------------------------------- player
 
-    private static void ApplyPlayer(RunState run, Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, ResyncResult result)
+    private static void ApplyPlayer(RunState run, Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, ResyncResult result)
     {
         string who = $"player {player.NetId}";
 
@@ -263,7 +274,7 @@ public static class HostStateApplier
 
         if (hostInCombat)
         {
-            ApplyPiles(run, player, combat, host, baseP, who, result);
+            ApplyPiles(run, player, combat, host, baseP, ids, who, result);
         }
 
         ApplyOrbs(player, combat, host, baseP, who, result);
@@ -432,11 +443,13 @@ public static class HostStateApplier
 
     // ----------------------------------------------------------------- piles
 
-    private static void ApplyPiles(RunState run, Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
+    private static void ApplyPiles(RunState run, Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, string who, ResyncResult result)
     {
         var localPiles = combat.AllPiles.Where(p => p.IsCombatPile).ToList();
         var localNow = localPiles.Select(NetFullCombatState.CombatPileState.From).ToList();
-        if (ListBytesEqual(localNow, host.piles))
+        // Equal values are not enough: identical cards can still hold each other's IDs (see CardIdLayout).
+        bool idsMatch = ids.Host == null || ids.Now.SamePlacement(ids.Host.Value, player.NetId);
+        if (ListBytesEqual(localNow, host.piles) && idsMatch)
         {
             return;
         }
@@ -445,11 +458,19 @@ public static class HostStateApplier
             result.Skip($"{who} card piles", "changed locally since checkpoint");
             return;
         }
+        if (ids.Base != null && !ids.Now.SamePlacement(ids.Base.Value, player.NetId))
+        {
+            result.Skip($"{who} card piles", "card IDs moved locally since checkpoint");
+            return;
+        }
 
-        // Pool every local combat card, then hand them out to the host's piles in the host's order.
+        // Pool every local combat card, then hand them out to the host's piles in the host's order: the card holding
+        // the host's ID for that slot when it is the same card, otherwise the closest by value (which then takes over
+        // that ID in ApplyCardIds).
+        var db = NetCombatCardDb.Instance;
         var pool = localPiles.SelectMany(p => p.Cards).ToList();
         var assignments = new List<(CardPile pile, List<CardModel> cards)>();
-        int created = 0;
+        int created = 0, byId = 0, byValue = 0;
         foreach (var hostPile in host.piles)
         {
             var pile = localPiles.FirstOrDefault(p => p.Type == hostPile.pileType);
@@ -458,20 +479,45 @@ public static class HostStateApplier
                 result.Skip($"{who} pile {hostPile.pileType}", "no such local pile");
                 continue;
             }
-            var cards = new List<CardModel>();
-            foreach (var hostCard in hostPile.cards)
+            var hostIds = ids.Host?.IdsOf(player.NetId, hostPile.pileType);
+            if (hostIds != null && hostIds.Count != hostPile.cards.Count)
             {
-                var match = TakeMatch(pool, hostCard.card);
+                result.Skip($"{who} pile {hostPile.pileType} ids", $"{hostIds.Count} IDs for {hostPile.cards.Count} cards");
+                hostIds = null;
+            }
+            var cards = new List<CardModel>();
+            for (int i = 0; i < hostPile.cards.Count; i++)
+            {
+                var hostCard = hostPile.cards[i];
+                uint hostId = hostIds?[i] ?? CardIdLayout.NoId;
+                CardModel? match = null;
+                CardModel? holder = null;
+                if (hostId != CardIdLayout.NoId && db.TryGetCard(hostId, out holder) && holder != null &&
+                    SameCard(holder, hostCard.card) && pool.Remove(holder))
+                {
+                    match = holder;
+                    byId++;
+                }
+                match ??= TakeMatch(pool, hostCard.card);
                 if (match == null)
                 {
                     match = CardModel.FromSerializable(hostCard.card);
                     run.AddCard(match, player);
                     created++;
                 }
+                else if (hostId != CardIdLayout.NoId && match != holder)
+                {
+                    byValue++;
+                }
+                if (hostId != CardIdLayout.NoId)
+                {
+                    ids.Assign.Add((match, hostId));
+                }
                 cards.Add(match);
             }
             assignments.Add((pile, cards));
         }
+        ids.Forget.AddRange(pool);
 
         int removed = pool.Count;
         foreach (var pile in localPiles)
@@ -497,7 +543,65 @@ public static class HostStateApplier
             pile.InvokeContentsChanged();
         }
         combat.RecalculateCardValues();
-        result.Fix($"{who} card piles", $"rebuilt from host ({created} cards created, {removed} removed)");
+        string matched = ids.Host != null ? $"{byId} by card ID, {byValue} by value, " : "";
+        result.Fix($"{who} card piles", $"rebuilt from host ({matched}{created} cards created, {removed} removed)");
+    }
+
+    private static bool SameCard(CardModel card, SerializableCard wanted) =>
+        card.Id == wanted.Id && card.CurrentUpgradeLevel == wanted.CurrentUpgradeLevel;
+
+    /// <summary>
+    /// Gives every card the pile rebuild placed the ID the host has at that slot, and brings the ID counter to
+    /// <c>host + (now - base)</c>, shifting IDs handed out locally since the checkpoint along with it. Without this, the
+    /// next "play card 23" names different cards on the two peers.
+    /// </summary>
+    private static void ApplyCardIds(IdPlan ids, ResyncResult result)
+    {
+        if (ids.Host == null || ids.NowNext == null)
+        {
+            return;
+        }
+        uint hostNext = ids.Host.Value.nextId;
+        uint nowNext = ids.NowNext.Value;
+        uint target = ids.Base != null ? (uint)Math.Max(0, (long)hostNext + nowNext - ids.Base.Value.nextId) : Math.Max(hostNext, nowNext);
+        long shift = ids.Base != null ? (long)hostNext - ids.Base.Value.nextId : 0;
+        uint shiftFrom = ids.Base?.nextId ?? uint.MaxValue;
+
+        var stale = ids.Assign.Where(a => !NetCombatCardDb.Instance.TryGetCardId(a.card, out var id) || id != a.id).ToList();
+        if (stale.Count == 0 && ids.Forget.Count == 0 && shift == 0 && target == nowNext)
+        {
+            return;
+        }
+        string? clash = CardIdDb.Rewrite(ids.Assign, ids.Forget, shiftFrom, shift, target, out int changed);
+        if (clash != null)
+        {
+            result.Skip("card ids", clash);
+            return;
+        }
+        uint after = CardIdDb.NextId ?? target;
+        if (changed > 0 || after != nowNext)
+        {
+            result.Fix("card ids", $"{changed} card(s) re-keyed to the host's IDs, next ID {nowNext} -> {after}");
+        }
+    }
+
+    /// <summary>The card-ID side of one resync: the layouts it works from and what the pile rebuild decided.</summary>
+    private sealed class IdPlan
+    {
+        public IdPlan(CardIdLayout? host, CardIdLayout? baseIds, CardIdLayout now, uint? nowNext)
+        {
+            Host = host;
+            Base = baseIds;
+            Now = now;
+            NowNext = nowNext;
+        }
+
+        public CardIdLayout? Host { get; }
+        public CardIdLayout? Base { get; }
+        public CardIdLayout Now { get; }
+        public uint? NowNext { get; }
+        public List<(CardModel card, uint id)> Assign { get; } = new();
+        public List<CardModel> Forget { get; } = new();
     }
 
     /// <summary>

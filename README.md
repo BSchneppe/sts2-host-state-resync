@@ -97,7 +97,8 @@ Per field:
 | potions | yes, gated | `AddPotionInternal` / `DiscardPotionInternal` |
 | relics (set and saved-property counters) | yes, gated | `AddRelicInternal` / `RemoveRelicInternal` / `SavedProperties.Fill` |
 | relic grab bag | yes, gated | `RelicGrabBag.LoadFromSerializable` |
-| card piles (order and contents) | yes, gated | pool all combat cards, redistribute in host order, create via `CardModel.FromSerializable`, drop leftovers |
+| card piles (order and contents) | yes, gated | pool all combat cards, redistribute in host order (the card holding the host's combat ID for that slot first, else by value), create via `CardModel.FromSerializable`, drop leftovers |
+| combat card IDs (`NetCombatCardDb`) | yes | host sends its ID layout (`HsrCardIdLayoutMessage`) before the divergence message; cards are re-keyed to the host's IDs and the ID counter merged as `host + (now - base)` |
 | next choice ids, next reward ids | yes | `FastForwardChoiceIds` / `FastForwardRewardIds` |
 | creature set (different count or identity) | no | a monster that died or spawned on one side only; creating or deleting creatures mid-combat is not something this mod attempts |
 | turn number / turn phase | no | flow control; the peers would need to be in the same async action anyway |
@@ -106,10 +107,16 @@ Per field:
 | last executed action id / hook id | n/a | informational |
 | anything outside `NetFullCombatState` | no | not in the checksum, so never detected in the first place |
 
-Card piles carry one residual risk: a card the client had to create gets a fresh
-`NetCombatCardDb` id, which may not equal the host's id for that card. A later card-play message
-referencing it could then hit the wrong card. That only matters when the pile *contents* (not just
-order) differed.
+Card piles need the card IDs, not just the cards. A card play travels as "combat card 23", and the
+host silently cancels it if its card 23 is not in hand. The checksum only sees card values, so a
+rebuild that puts two identical Strikes back in each other's slots hashes clean and still breaks the
+next play of either. That happened in a real session (v0.1.0, 2026-10-09): after `hsr desync shuffle`
+was "healed", a Strike was cancelled on the host only, a monster died on the client only, and the
+creature-set mismatch got the client kicked. Since v0.2.0 every peer records its ID layout at every
+checkpoint, the host sends its layout ahead of the vanilla divergence message, and the client places
+and re-keys cards by ID. The new message changes the game's message numbering, which is why the
+version was bumped: the join check compares gameplay mods by `id-version`, so mixed builds refuse to
+connect instead of misreading each other's messages.
 
 ## Install / build
 
@@ -140,10 +147,12 @@ cannot drift their own state on purpose; use `-c Debug` for testing.
 **Fake second player, no network: `hsr selftest`.** Works in any combat, singleplayer included. For every scenario
 it snapshots the live state as the "host truth", perturbs the live state the way a drifted client would look
 (energy, gold, run RNG, player RNG, enemy HP, block, power amount, pile order, extra card, potion, relic, orb,
-choice ids), snapshots that as the client's own checkpoint, runs `HostStateApplier.Apply` and asserts that the live
-state hashes back to the truth with the game's own `ChecksumTracker.GenerateChecksum`. A final scenario adds a
-lockstep action after the checkpoint (+1 energy) and checks the three-way merge keeps it. `hsr selftest energy`
-runs one scenario; failures print a line diff of the two state dumps.
+choice ids, two identical cards swapping places), snapshots that as the client's own checkpoint, runs
+`HostStateApplier.Apply` and asserts that the live state hashes back to the truth with the game's own
+`ChecksumTracker.GenerateChecksum` AND that every combat card ID is back in its slot (`CardIdLayout`). The checksum
+alone passed the broken v0.1.0 shuffle repair. A final scenario adds a lockstep action after the checkpoint (+1
+energy) and checks the three-way merge keeps it. `hsr selftest energy` runs one scenario; failures print a line diff
+of the two state dumps and of the two ID layouts.
 
 **Real second player, local ENet: `tools/localmp.sh`.** The game ships a developer shortcut: `--fastmp=host_standard`
 hosts over ENet on `127.0.0.1:33771` without Steam, `--fastmp=join --clientId=1001` joins it. The script launches
@@ -156,3 +165,7 @@ Status 2026-09-24: `hsr selftest` was run in a live fight through the STS2 MCP c
 (`GET localhost:15526/console?cmd=hsr%20selftest`) and passes every scenario; it caught one real bug on
 the first run (card matching used `SerializableCard.Equals`, which ignores the floor-added field that
 the checksum includes). The two-instance ENet path has not been run yet.
+
+Status 2026-10-09: a real two-player Steam session ran the v0.1.0 test plan. Combined drifts (energy, gold, rng,
+playerrng, hp, block) healed in one resync; the shuffle repair broke card IDs as described under "Which divergences
+are fixable". v0.2.0 (card IDs) builds but has not been run in game yet.
