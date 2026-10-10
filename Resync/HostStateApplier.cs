@@ -287,40 +287,125 @@ public static class HostStateApplier
 
     private static void ApplyPotions(Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
     {
+        // In order: the checksum hashes the potions in slot order.
         var localIds = player.Potions.Select(p => p.Id).ToList();
         var hostIds = host.potions.Select(p => p.id).ToList();
-        if (Same(localIds, hostIds))
+        if (localIds.SequenceEqual(hostIds))
         {
             return;
         }
-        if (baseP != null && !Same(localIds, baseP.Value.potions.Select(p => p.id).ToList()))
+        if (baseP != null && !localIds.SequenceEqual(baseP.Value.potions.Select(p => p.id)))
         {
             result.Skip($"{who} potions", "changed locally since checkpoint");
             return;
         }
 
-        var extra = new List<ModelId>(localIds);
-        foreach (var id in hostIds)
+        var changes = new List<string>();
+        if (!Same(localIds, hostIds))
         {
-            extra.Remove(id);
-        }
-        var missing = new List<ModelId>(hostIds);
-        foreach (var id in localIds)
-        {
-            missing.Remove(id);
-        }
+            var extra = new List<ModelId>(localIds);
+            foreach (var id in hostIds)
+            {
+                extra.Remove(id);
+            }
+            var missing = new List<ModelId>(hostIds);
+            foreach (var id in localIds)
+            {
+                missing.Remove(id);
+            }
 
-        foreach (var id in extra)
-        {
-            var potion = player.Potions.First(p => p.Id == id);
-            player.DiscardPotionInternal(potion, silent: true);
+            foreach (var id in extra)
+            {
+                var potion = player.Potions.First(p => p.Id == id);
+                player.DiscardPotionInternal(potion, silent: true);
+            }
+            foreach (var id in missing)
+            {
+                var potion = PotionModel.FromSerializable(new SerializablePotion { Id = id });
+                player.AddPotionInternal(potion, -1, silent: true);
+            }
+            changes.Add($"removed [{Join(extra)}], added [{Join(missing)}]");
         }
-        foreach (var id in missing)
+        if (ReorderPotions(player, hostIds))
         {
-            var potion = PotionModel.FromSerializable(new SerializablePotion { Id = id });
-            player.AddPotionInternal(potion, -1, silent: true);
+            changes.Add("reordered");
         }
-        result.Fix($"{who} potions", $"removed [{Join(extra)}], added [{Join(missing)}]");
+        if (changes.Count > 0)
+        {
+            result.Fix($"{who} potions", string.Join(", ", changes));
+        }
+    }
+
+    private static readonly FieldInfo? PotionSlotsField = AccessTools.Field(typeof(Player), "_potionSlots");
+    private static readonly FieldInfo? RelicsField = AccessTools.Field(typeof(Player), "_relics");
+    private static readonly FieldInfo? PowersField = AccessTools.Field(typeof(Creature), "_powers");
+
+    /// <summary>
+    /// Puts the potions in the host's order within the slots already occupied. The snapshot does not say which slots
+    /// the host's potions sit in, and the network names a potion by its slot index, so moving potions into other slots
+    /// could break the next potion use instead.
+    /// </summary>
+    private static bool ReorderPotions(Player player, List<ModelId> hostOrder)
+    {
+        if (PotionSlotsField?.GetValue(player) is not List<PotionModel> slots)
+        {
+            return false;
+        }
+        var occupied = Enumerable.Range(0, slots.Count).Where(i => slots[i] != null).ToList();
+        var ordered = InOrder(occupied.Select(i => slots[i]).ToList(), hostOrder, p => p.Id);
+        if (ordered == null)
+        {
+            return false;
+        }
+        bool changed = false;
+        for (int k = 0; k < occupied.Count; k++)
+        {
+            if (slots[occupied[k]] != ordered[k])
+            {
+                slots[occupied[k]] = ordered[k];
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// <summary>Reorders a private model list in place to the host's order; false if it already was or cannot be.</summary>
+    private static bool Reorder<T>(FieldInfo? field, object owner, List<ModelId> hostOrder, Func<T, ModelId> id) where T : class
+    {
+        if (field?.GetValue(owner) is not List<T> list)
+        {
+            return false;
+        }
+        var ordered = InOrder(list, hostOrder, id);
+        if (ordered == null || ordered.SequenceEqual(list))
+        {
+            return false;
+        }
+        list.Clear();
+        list.AddRange(ordered);
+        return true;
+    }
+
+    /// <summary>The same instances in the host's order (duplicates matched one by one), or null if the sets differ.</summary>
+    private static List<T>? InOrder<T>(List<T> items, List<ModelId> hostOrder, Func<T, ModelId> id) where T : class
+    {
+        if (items.Count != hostOrder.Count)
+        {
+            return null;
+        }
+        var pool = items.ToList();
+        var ordered = new List<T>();
+        foreach (var wanted in hostOrder)
+        {
+            var match = pool.FirstOrDefault(x => id(x) == wanted);
+            if (match == null)
+            {
+                return null;
+            }
+            ordered.Add(match);
+            pool.Remove(match);
+        }
+        return ordered;
     }
 
     private static void ApplyRelics(Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
@@ -367,6 +452,11 @@ public static class HostStateApplier
                 player.AddRelicInternal(RelicModel.FromSerializable(hostRelic), -1, silent: true);
                 changes.Add($"+{hostRelic.Id}");
             }
+        }
+        // The checksum hashes relics in order, and AddRelicInternal appends.
+        if (Reorder<RelicModel>(RelicsField, player, hostIds, r => r.Id))
+        {
+            changes.Add("reordered");
         }
         if (changes.Count > 0)
         {
@@ -800,22 +890,25 @@ public static class HostStateApplier
             return;
         }
 
+        // Powers are matched one by one in the host's order, so two instances of the same power (instanced powers) keep
+        // their own amounts instead of both mapping onto the first. The checksum hashes them in order, and both
+        // ApplyInternal and a removal change the order, so they are put back in the host's order at the end.
         var localIds = creature.Powers.Select(p => p.Id).ToList();
         var hostIds = host.powers.Select(p => p.id).ToList();
+        var changes = new List<string>();
         if (Same(localIds, hostIds))
         {
-            // Same powers, different amounts.
+            // Same powers: merge the amounts.
             var pool = creature.Powers.ToList();
-            var changes = new List<string>();
+            var seen = new Dictionary<ModelId, int>();
             foreach (var hp in host.powers)
             {
                 var power = pool.First(p => p.Id == hp.id);
                 pool.Remove(power);
-                int? baseAmount = b?.powers.FirstOrDefault(bp => bp.id == hp.id).amount;
-                if (b != null && b.Value.powers.All(bp => bp.id != hp.id))
-                {
-                    baseAmount = null;
-                }
+                int nth = seen.TryGetValue(hp.id, out var n) ? n : 0;
+                seen[hp.id] = nth + 1;
+                var basePowers = b?.powers.Where(bp => bp.id == hp.id).ToList();
+                int? baseAmount = b == null ? null : nth < basePowers!.Count ? basePowers[nth].amount : null;
                 var outcome = MergeScalar(hp.amount, baseAmount, power.Amount, turnMoved, out int target);
                 if (outcome == Merged.Defer)
                 {
@@ -827,49 +920,56 @@ public static class HostStateApplier
                     power.SetAmount(target, silent: true);
                 }
             }
-            if (changes.Count > 0)
+        }
+        else
+        {
+            if (b != null && !ListBytesEqual(localPowers, b.Value.powers))
             {
-                result.Fix($"{who} powers", string.Join(", ", changes));
+                result.Skip($"{who} power set", "changed locally since checkpoint");
+                return;
             }
-            return;
-        }
 
-        if (b != null && !ListBytesEqual(localPowers, b.Value.powers))
-        {
-            result.Skip($"{who} power set", "changed locally since checkpoint");
-            return;
-        }
-
-        var changed = new List<string>();
-        foreach (var power in creature.Powers.Where(p => !hostIds.Contains(p.Id)).ToList())
-        {
-            power.RemoveInternal();
-            changed.Add($"-{power.Id}");
-        }
-        foreach (var hp in host.powers)
-        {
-            var existing = creature.GetPowerById(hp.id);
-            if (existing != null)
+            var pool = creature.Powers.ToList();
+            var missing = new List<NetFullCombatState.PowerState>();
+            foreach (var hp in host.powers)
             {
+                var existing = pool.FirstOrDefault(p => p.Id == hp.id);
+                if (existing == null)
+                {
+                    missing.Add(hp);
+                    continue;
+                }
+                pool.Remove(existing);
                 if (existing.Amount != hp.amount)
                 {
                     existing.SetAmount(hp.amount, silent: true);
-                    changed.Add($"{hp.id} = {hp.amount}");
+                    changes.Add($"{hp.id} = {hp.amount}");
                 }
-                continue;
             }
-            var canonical = ModelDb.GetByIdOrNull<PowerModel>(hp.id);
-            if (canonical == null)
+            foreach (var power in pool)
             {
-                result.Skip($"{who} power {hp.id}", "unknown power id");
-                continue;
+                power.RemoveInternal();
+                changes.Add($"-{power.Id}");
             }
-            canonical.ToMutable().ApplyInternal(creature, hp.amount, silent: true);
-            changed.Add($"+{hp.id} {hp.amount}");
+            foreach (var hp in missing)
+            {
+                var canonical = ModelDb.GetByIdOrNull<PowerModel>(hp.id);
+                if (canonical == null)
+                {
+                    result.Skip($"{who} power {hp.id}", "unknown power id");
+                    continue;
+                }
+                canonical.ToMutable().ApplyInternal(creature, hp.amount, silent: true);
+                changes.Add($"+{hp.id} {hp.amount}");
+            }
         }
-        if (changed.Count > 0)
+        if (Reorder<PowerModel>(PowersField, creature, hostIds, p => p.Id))
         {
-            result.Fix($"{who} powers", string.Join(", ", changed));
+            changes.Add("reordered");
+        }
+        if (changes.Count > 0)
+        {
+            result.Fix($"{who} powers", string.Join(", ", changes));
         }
     }
 
