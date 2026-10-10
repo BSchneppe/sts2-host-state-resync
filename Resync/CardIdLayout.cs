@@ -214,56 +214,79 @@ public static class CardIdDb
     public static uint? NextId => NextIdField?.GetValue(NetCombatCardDb.Instance) as uint?;
 
     /// <summary>
-    /// Rewrites the ID map: <paramref name="assign"/> gives cards the host's IDs, <paramref name="forget"/> drops cards
-    /// that left combat, IDs handed out locally since the checkpoint shift by <paramref name="shift"/> (they belong to
-    /// cards the host will create later and number from its own counter), and the counter becomes
-    /// <paramref name="nextId"/>. All-or-nothing: on a clash the map is left untouched and the reason returned.
+    /// Plans an ID rewrite without touching the database. <paramref name="forget"/> drops cards the rebuild takes out of
+    /// combat; IDs at or above <paramref name="shiftFrom"/> move by <paramref name="shift"/> (handed out locally since the
+    /// checkpoint, they belong to cards the host will number from its own counter); <paramref name="assign"/> gives cards
+    /// the host's IDs, and <paramref name="reserved"/> keeps IDs free for cards the rebuild is about to create.
     /// </summary>
-    public static string? Rewrite(IReadOnlyList<(CardModel card, uint id)> assign, IReadOnlyCollection<CardModel> forget,
-        uint shiftFrom, long shift, uint nextId, out int changed)
+    /// <remarks>
+    /// A wanted ID can already be held by another card. If that card has left every pile (the database never forgets a
+    /// card, so a played Power keeps its ID), it is evicted. If it is in <paramref name="live"/>, still in play and not
+    /// being moved, the plan fails: taking its ID would break that card instead. Returns the reason, or null.
+    /// </remarks>
+    public static string? Plan(IReadOnlyList<(CardModel card, uint id)> assign, IReadOnlyCollection<uint> reserved,
+        IReadOnlyCollection<CardModel> forget, IReadOnlySet<CardModel> live, uint shiftFrom, long shift, uint nextId,
+        out CardIdRewrite? plan)
     {
-        changed = 0;
+        plan = null;
         if (!Available) return "NetCombatCardDb internals changed";
 
-        var db = NetCombatCardDb.Instance;
-        var cardToId = (Dictionary<CardModel, uint>)CardToIdField!.GetValue(db)!;
-        var idToCard = (Dictionary<uint, CardModel>)IdToCardField!.GetValue(db)!;
-
+        var cardToId = (Dictionary<CardModel, uint>)CardToIdField!.GetValue(NetCombatCardDb.Instance)!;
         var next = new Dictionary<CardModel, uint>(cardToId);
         foreach (var card in forget) next.Remove(card);
-        var assigned = new HashSet<CardModel>();
-        foreach (var (card, id) in assign)
-        {
-            next[card] = id;
-            assigned.Add(card);
-        }
+
+        var assigned = assign.Select(a => a.card).ToHashSet();
         if (shift != 0)
         {
             foreach (var card in next.Keys.ToList())
             {
-                if (!assigned.Contains(card) && next[card] >= shiftFrom && next[card] != CardIdLayout.NoId)
+                if (!assigned.Contains(card) && next[card] >= shiftFrom)
                 {
                     next[card] = (uint)(next[card] + shift);
                 }
             }
         }
 
+        var wanted = assign.Select(a => a.id).Concat(reserved).ToHashSet();
+        int evicted = 0;
+        foreach (var (card, id) in next.ToList())
+        {
+            if (assigned.Contains(card) || !wanted.Contains(id)) continue;
+            if (live.Contains(card)) return $"card ID {id} is held by {card}, which is still in play";
+            next.Remove(card);
+            evicted++;
+        }
+        foreach (var (card, id) in assign) next[card] = id;
+
         var byId = new Dictionary<uint, CardModel>();
         foreach (var (card, id) in next)
         {
-            if (byId.TryGetValue(id, out var other))
-            {
-                return $"ID {id} would belong to both {other} and {card}";
-            }
+            if (byId.TryGetValue(id, out var other)) return $"ID {id} would belong to both {other} and {card}";
             byId[id] = card;
         }
-        uint floor = byId.Count == 0 ? 0 : byId.Keys.Max() + 1;
-        if (nextId < floor) nextId = floor;
-
-        foreach (var (card, id) in next)
+        foreach (var id in reserved)
         {
-            if (!cardToId.TryGetValue(card, out var old) || old != id) changed++;
+            if (byId.TryGetValue(id, out var holder)) return $"ID {id} is needed for a created card but held by {holder}";
         }
+        uint floor = byId.Keys.Concat(reserved).Select(id => id + 1).DefaultIfEmpty(0u).Max();
+        plan = new CardIdRewrite(next, Math.Max(nextId, floor), evicted);
+        return null;
+    }
+
+    /// <summary>
+    /// Writes a planned rewrite, plus the IDs of the cards the rebuild created after planning (which the database gave
+    /// throwaway IDs of its own meanwhile). Returns how many cards now hold a different ID than before.
+    /// </summary>
+    public static int Commit(CardIdRewrite plan, IReadOnlyList<(CardModel card, uint id)> created)
+    {
+        var db = NetCombatCardDb.Instance;
+        var cardToId = (Dictionary<CardModel, uint>)CardToIdField!.GetValue(db)!;
+        var idToCard = (Dictionary<uint, CardModel>)IdToCardField!.GetValue(db)!;
+
+        var next = new Dictionary<CardModel, uint>(plan.Next);
+        foreach (var (card, id) in created) next[card] = id;
+        int changed = next.Count(kv => !cardToId.TryGetValue(kv.Key, out var old) || old != kv.Value);
+
         cardToId.Clear();
         idToCard.Clear();
         foreach (var (card, id) in next)
@@ -271,7 +294,24 @@ public static class CardIdDb
             cardToId[card] = id;
             idToCard[id] = card;
         }
-        NextIdField!.SetValue(db, nextId);
-        return null;
+        NextIdField!.SetValue(db, plan.NextId);
+        return changed;
     }
+}
+
+/// <summary>A validated card-ID rewrite, ready for <see cref="CardIdDb.Commit"/>.</summary>
+public sealed class CardIdRewrite
+{
+    internal CardIdRewrite(Dictionary<CardModel, uint> next, uint nextId, int evicted)
+    {
+        Next = next;
+        NextId = nextId;
+        Evicted = evicted;
+    }
+
+    internal Dictionary<CardModel, uint> Next { get; }
+    internal uint NextId { get; }
+
+    /// <summary>Cards that had left every pile and gave up an ID the host needs elsewhere.</summary>
+    public int Evicted { get; }
 }

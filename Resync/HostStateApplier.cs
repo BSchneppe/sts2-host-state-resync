@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -79,7 +80,8 @@ public static class HostStateApplier
         }
 
         Try(result, "creatures", () => ApplyCreatures(run, host, baseState, turnMoved, result));
-        Try(result, "card ids", () => ApplyCardIds(ids, result));
+        // After the creatures: card values (RecalculateCardValues) follow the powers just written.
+        Try(result, "card piles", () => CommitPiles(ids, run, result));
         return result;
     }
 
@@ -272,7 +274,7 @@ public static class HostStateApplier
 
         if (hostInCombat)
         {
-            ApplyPiles(player, combat, host, baseP, ids, who, result);
+            PlanPiles(player, combat, host, baseP, ids, who, result);
         }
 
         ApplyOrbs(player, combat, host, baseP, who, result);
@@ -441,7 +443,12 @@ public static class HostStateApplier
 
     // ----------------------------------------------------------------- piles
 
-    private static void ApplyPiles(Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, string who, ResyncResult result)
+    /// <summary>
+    /// Plans one player's pile rebuild without touching anything. <see cref="CommitPiles"/> applies every player's plan
+    /// together with the card-ID rewrite, or none of it: rebuilt piles with misplaced IDs are worse than no rebuild,
+    /// because they hash clean while the next play of a misplaced card is cancelled on the host only.
+    /// </summary>
+    private static void PlanPiles(Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, string who, ResyncResult result)
     {
         var localPiles = combat.AllPiles.Where(p => p.IsCombatPile).ToList();
         var combatScope = player.Creature.CombatState;
@@ -468,6 +475,8 @@ public static class HostStateApplier
             return;
         }
 
+        var plan = new PilePlan(player, combat, combatScope, host, who, localPiles);
+
         // Every slot of the host's piles, in the host's order, with the host's card ID where we have one.
         var slots = new List<(CardPile pile, NetFullCombatState.CardState card, uint id)>();
         foreach (var hostPile in host.piles)
@@ -493,7 +502,7 @@ public static class HostStateApplier
         // Hand our cards out to those slots in passes, strictest first and across all slots, so that a loose match for
         // one slot never takes the card a stricter pass would have given another: the same card state (card, affliction,
         // cost, keywords) held under the host's ID, the same state under any ID, the same card and upgrade under the
-        // host's ID, the same card and upgrade. Whatever takes a slot under another ID is re-keyed in ApplyCardIds.
+        // host's ID, the same card and upgrade. Whatever takes a slot under another ID is re-keyed in CommitPiles.
         var db = NetCombatCardDb.Instance;
         var pool = localPiles.SelectMany(p => p.Cards).ToList();
         var states = pool.ToDictionary(c => c, NetFullCombatState.CardState.From);
@@ -523,112 +532,148 @@ public static class HostStateApplier
             }
         }
 
-        var assignments = new List<(CardPile pile, List<CardModel> cards)>();
-        int created = 0, byId = 0, byValue = 0;
         for (int i = 0; i < slots.Count; i++)
         {
-            var (pile, hostCard, hostId) = slots[i];
-            var match = picks[i];
-            if (match == null)
+            var (pile, card, id) = slots[i];
+            var pick = picks[i];
+            if (pick != null && Holds(pick, id))
             {
-                match = CardModel.FromSerializable(hostCard.card);
-                // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for an
-                // in-combat card the CombatState does not contain, so a run-scoped card would break on its next draw.
-                combatScope.AddCard(match, player);
-                created++;
+                plan.ById++;
             }
-            else if (Holds(match, hostId))
+            else if (pick != null && id != CardIdLayout.NoId)
             {
-                byId++;
+                plan.ByValue++;
             }
-            else if (hostId != CardIdLayout.NoId)
-            {
-                byValue++;
-            }
-            if (hostId != CardIdLayout.NoId)
-            {
-                ids.Assign.Add((match, hostId));
-            }
-            if (assignments.Count == 0 || assignments[^1].pile != pile)
-            {
-                assignments.Add((pile, new List<CardModel>()));
-            }
-            assignments[^1].cards.Add(match);
+            plan.Slots.Add((pile, pick, card, id));
         }
-        ids.Forget.AddRange(pool);
-
-        int removed = pool.Count;
-        foreach (var pile in localPiles)
-        {
-            foreach (var card in pile.Cards.ToList())
-            {
-                pile.RemoveInternal(card, silent: true);
-            }
-        }
-        foreach (var (pile, cards) in assignments)
-        {
-            foreach (var card in cards)
-            {
-                pile.AddInternal(card, -1, silent: true);
-            }
-        }
-        foreach (var pile in localPiles)
-        {
-            pile.InvokeContentsChanged();
-        }
-        combat.RecalculateCardValues();
-        string matched = ids.Host != null ? $"{byId} by card ID, {byValue} by value, " : "";
-        result.Fix($"{who} card piles", $"rebuilt from host ({matched}{created} cards created, {removed} removed)");
-
-        // Nothing here writes a card's own values, so a card whose cost, keywords, affliction or enchantment differ
-        // from every candidate stays different. Say so instead of letting the rebuild read as a full repair.
-        var after = localPiles.Select(NetFullCombatState.CombatPileState.From).ToList();
-        int stillDifferent = after.Zip(host.piles).Sum(p => p.First.cards.Zip(p.Second.cards).Count(c => !BytesEqual(c.First, c.Second)));
-        if (stillDifferent > 0)
-        {
-            result.Skip($"{who} card piles", $"{stillDifferent} card(s) still differ in cost, keywords, affliction or enchantment, which a resync cannot write");
-        }
+        plan.Leftovers.AddRange(pool);
+        ids.Piles.Add(plan);
     }
 
     private static bool SameCard(CardModel card, SerializableCard wanted) =>
         card.Id == wanted.Id && card.CurrentUpgradeLevel == wanted.CurrentUpgradeLevel;
 
     /// <summary>
-    /// Gives every card the pile rebuild placed the ID the host has at that slot, and brings the ID counter to
-    /// <c>host + (now - base)</c>, shifting IDs handed out locally since the checkpoint along with it. Without this, the
-    /// next "play card 23" names different cards on the two peers.
+    /// Applies the planned pile rebuilds and puts every card under the ID the host has for its slot, as one step.
     /// </summary>
-    private static void ApplyCardIds(IdPlan ids, ResyncResult result)
+    /// <remarks>
+    /// The ID rewrite is planned first, against the database as it is: cards the rebuild drops lose their IDs, IDs handed
+    /// out locally since the checkpoint move with the counter (<c>host + (now - base)</c>), and a host ID still held by a
+    /// card that has left every pile (a played Power, say; the database never forgets a card) is taken from it. If an ID
+    /// is held by a card that is still in play and not being moved, nothing is touched at all, piles included.
+    /// </remarks>
+    private static void CommitPiles(IdPlan ids, RunState run, ResyncResult result)
     {
-        if (ids.Host == null || ids.NowNext == null)
+        uint nowNext = ids.NowNext ?? 0;
+        CardIdRewrite? rewrite = null;
+        if (ids.Host != null && ids.NowNext != null)
         {
-            return;
-        }
-        uint hostNext = ids.Host.Value.nextId;
-        uint nowNext = ids.NowNext.Value;
-        uint target = ids.Base != null ? (uint)Math.Max(0, (long)hostNext + nowNext - ids.Base.Value.nextId) : Math.Max(hostNext, nowNext);
-        long shift = ids.Base != null ? (long)hostNext - ids.Base.Value.nextId : 0;
-        uint shiftFrom = ids.Base?.nextId ?? uint.MaxValue;
+            uint hostNext = ids.Host.Value.nextId;
+            if (ids.Base != null && nowNext < ids.Base.Value.nextId)
+            {
+                // StartCombat resets the counter to 0; this checkpoint belongs to a combat that is over.
+                foreach (var plan in ids.Piles)
+                {
+                    result.Skip($"{plan.Who} card piles", "a new combat started since the checkpoint");
+                }
+                result.Skip("card ids", "a new combat started since the checkpoint");
+                return;
+            }
+            uint target = ids.Base != null ? (uint)Math.Max(0, (long)hostNext + nowNext - ids.Base.Value.nextId) : Math.Max(hostNext, nowNext);
+            long shift = ids.Base != null ? (long)hostNext - ids.Base.Value.nextId : 0;
+            uint shiftFrom = ids.Base?.nextId ?? uint.MaxValue;
+            if (ids.Piles.Count == 0 && shift == 0 && target == nowNext)
+            {
+                return;
+            }
 
-        var stale = ids.Assign.Where(a => !NetCombatCardDb.Instance.TryGetCardId(a.card, out var id) || id != a.id).ToList();
-        if (stale.Count == 0 && ids.Forget.Count == 0 && shift == 0 && target == nowNext)
-        {
-            return;
+            var assign = ids.Piles.SelectMany(p => p.Slots).Where(s => s.card != null && s.id != CardIdLayout.NoId)
+                .Select(s => (s.card!, s.id)).ToList();
+            var reserved = ids.Piles.SelectMany(p => p.Slots).Where(s => s.card == null && s.id != CardIdLayout.NoId)
+                .Select(s => s.id).ToList();
+            var forget = ids.Piles.SelectMany(p => p.Leftovers).ToHashSet();
+            var moving = assign.Select(a => a.Item1).ToHashSet();
+            var live = run.Players.Where(p => p.PlayerCombatState != null)
+                .SelectMany(p => p.PlayerCombatState!.AllPiles.Where(pile => pile.IsCombatPile).SelectMany(pile => pile.Cards))
+                .Where(c => !forget.Contains(c) && !moving.Contains(c)).ToHashSet();
+            string? clash = CardIdDb.Plan(assign, reserved, forget, live, shiftFrom, shift, target, out rewrite);
+            if (clash != null)
+            {
+                foreach (var plan in ids.Piles)
+                {
+                    result.Skip($"{plan.Who} card piles", $"not rebuilt: {clash}");
+                }
+                result.Skip("card ids", clash);
+                return;
+            }
         }
-        string? clash = CardIdDb.Rewrite(ids.Assign, ids.Forget, shiftFrom, shift, target, out int changed);
-        if (clash != null)
+
+        var created = new List<(CardModel card, uint id)>();
+        foreach (var plan in ids.Piles)
         {
-            result.Skip("card ids", clash);
-            return;
+            var placed = new List<(CardPile pile, CardModel card)>();
+            int createdHere = 0;
+            foreach (var (pile, card, state, id) in plan.Slots)
+            {
+                var placedCard = card;
+                if (placedCard == null)
+                {
+                    placedCard = CardModel.FromSerializable(state.card);
+                    // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for an
+                    // in-combat card the CombatState does not contain, so a run-scoped card would break on its next draw.
+                    plan.Scope.AddCard(placedCard, plan.Player);
+                    createdHere++;
+                    if (id != CardIdLayout.NoId)
+                    {
+                        created.Add((placedCard, id));
+                    }
+                }
+                placed.Add((pile, placedCard));
+            }
+
+            foreach (var pile in plan.Piles)
+            {
+                foreach (var card in pile.Cards.ToList())
+                {
+                    pile.RemoveInternal(card, silent: true);
+                }
+            }
+            foreach (var (pile, card) in placed)
+            {
+                pile.AddInternal(card, -1, silent: true);
+            }
+            foreach (var pile in plan.Piles)
+            {
+                pile.InvokeContentsChanged();
+            }
+            plan.Combat.RecalculateCardValues();
+            string matched = ids.Host != null ? $"{plan.ById} by card ID, {plan.ByValue} by value, " : "";
+            result.Fix($"{plan.Who} card piles",
+                $"rebuilt from host ({matched}{createdHere} cards created, {plan.Leftovers.Count} removed)");
+
+            // Nothing here writes a card's own values, so a card whose cost, keywords, affliction or enchantment differ
+            // from every candidate stays different. Say so instead of letting the rebuild read as a full repair.
+            var after = plan.Piles.Select(NetFullCombatState.CombatPileState.From).ToList();
+            int stillDifferent = after.Zip(plan.Host.piles).Sum(p => p.First.cards.Zip(p.Second.cards).Count(c => !BytesEqual(c.First, c.Second)));
+            if (stillDifferent > 0)
+            {
+                result.Skip($"{plan.Who} card piles", $"{stillDifferent} card(s) still differ in cost, keywords, affliction or enchantment, which a resync cannot write");
+            }
         }
-        uint after = CardIdDb.NextId ?? target;
-        if (changed > 0 || after != nowNext)
+
+        if (rewrite != null)
         {
-            result.Fix("card ids", $"{changed} card(s) re-keyed to the host's IDs, next ID {nowNext} -> {after}");
+            int changed = CardIdDb.Commit(rewrite, created);
+            uint after = CardIdDb.NextId ?? nowNext;
+            if (changed > 0 || rewrite.Evicted > 0 || after != nowNext)
+            {
+                string evicted = rewrite.Evicted > 0 ? $", {rewrite.Evicted} taken from cards no longer in play" : "";
+                result.Fix("card ids", $"{changed} card(s) re-keyed to the host's IDs{evicted}, next ID {nowNext} -> {after}");
+            }
         }
     }
 
-    /// <summary>The card-ID side of one resync: the layouts it works from and what the pile rebuild decided.</summary>
+    /// <summary>The card-ID side of one resync: the layouts it works from and every player's planned pile rebuild.</summary>
     private sealed class IdPlan
     {
         public IdPlan(CardIdLayout? host, CardIdLayout? baseIds, CardIdLayout now, uint? nowNext)
@@ -643,8 +688,33 @@ public static class HostStateApplier
         public CardIdLayout? Base { get; }
         public CardIdLayout Now { get; }
         public uint? NowNext { get; }
-        public List<(CardModel card, uint id)> Assign { get; } = new();
-        public List<CardModel> Forget { get; } = new();
+        public List<PilePlan> Piles { get; } = new();
+    }
+
+    /// <summary>One player's piles as the host has them: per slot, our card that takes it (null: create one).</summary>
+    private sealed class PilePlan
+    {
+        public PilePlan(Player player, PlayerCombatState combat, ICombatState scope, NetFullCombatState.PlayerState host,
+            string who, List<CardPile> piles)
+        {
+            Player = player;
+            Combat = combat;
+            Scope = scope;
+            Host = host;
+            Who = who;
+            Piles = piles;
+        }
+
+        public Player Player { get; }
+        public PlayerCombatState Combat { get; }
+        public ICombatState Scope { get; }
+        public NetFullCombatState.PlayerState Host { get; }
+        public string Who { get; }
+        public List<CardPile> Piles { get; }
+        public List<(CardPile pile, CardModel? card, NetFullCombatState.CardState state, uint id)> Slots { get; } = new();
+        public List<CardModel> Leftovers { get; } = new();
+        public int ById { get; set; }
+        public int ByValue { get; set; }
     }
 
     // ------------------------------------------------------------- creatures
