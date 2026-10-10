@@ -56,6 +56,12 @@ public static class HostStateApplier
             result.Skip("card ids", "host sent no card ID layout; piles are matched by value only");
         }
 
+        // Turn setup assigns some values outright (ResetEnergy, block clearing) instead of changing them by an amount.
+        // Once a player's turn or phase moved on since the checkpoint, a local change to a counter may be one of
+        // those resets, and re-applying it as a delta on top of the host's value would be wrong.
+        bool turnMoved = baseState != null && baseState.Players.Any(bp =>
+            run.GetPlayer(bp.playerId)?.PlayerCombatState is { } c && (c.TurnNumber != bp.turnNumber || c.Phase != bp.phase));
+
         Try(result, "run RNG", () => ApplyRunRng(run.Rng, host.Rng, baseState?.Rng, result));
         Try(result, "sync markers", () => ApplySyncMarkers(host, baseState, result));
 
@@ -69,10 +75,10 @@ public static class HostStateApplier
             }
             var basePlayer = FindPlayer(baseState, hostPlayer.playerId);
             var hp = hostPlayer;
-            Try(result, $"player {player.NetId}", () => ApplyPlayer(run, player, hp, basePlayer, ids, result));
+            Try(result, $"player {player.NetId}", () => ApplyPlayer(run, player, hp, basePlayer, ids, turnMoved, result));
         }
 
-        Try(result, "creatures", () => ApplyCreatures(run, host, baseState, result));
+        Try(result, "creatures", () => ApplyCreatures(run, host, baseState, turnMoved, result));
         Try(result, "card ids", () => ApplyCardIds(ids, result));
         return result;
     }
@@ -209,24 +215,14 @@ public static class HostStateApplier
 
     // ---------------------------------------------------------------- player
 
-    private static void ApplyPlayer(RunState run, Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, ResyncResult result)
+    private static void ApplyPlayer(RunState run, Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, IdPlan ids, bool turnMoved, ResyncResult result)
     {
         string who = $"player {player.NetId}";
 
-        if (player.Gold != host.gold)
+        ApplyScalar($"{who} gold", host.gold, baseP?.gold, player.Gold, 0, turnMoved, v => player.Gold = v, result);
+        ApplyScalar($"{who} max potions", host.maxPotionCount, baseP?.maxPotionCount, player.MaxPotionCount, 0, turnMoved, v =>
         {
-            int target = Merge(host.gold, baseP?.gold, player.Gold);
-            if (target != player.Gold)
-            {
-                result.Fix($"{who} gold", $"{player.Gold} -> {target}");
-                player.Gold = Math.Max(0, target);
-            }
-        }
-
-        if (player.MaxPotionCount != host.maxPotionCount)
-        {
-            int target = Merge(host.maxPotionCount, baseP?.maxPotionCount, player.MaxPotionCount);
-            int diff = target - player.MaxPotionCount;
+            int diff = v - player.MaxPotionCount;
             if (diff > 0)
             {
                 player.AddToMaxPotionCount(diff);
@@ -235,11 +231,7 @@ public static class HostStateApplier
             {
                 player.SubtractFromMaxPotionCount(-diff);
             }
-            if (diff != 0)
-            {
-                result.Fix($"{who} max potions", $"{player.MaxPotionCount - diff} -> {target}");
-            }
-        }
+        }, result);
 
         ApplyPlayerRng(player.PlayerRng, host.rngSet, baseP?.rngSet, who, result);
 
@@ -275,24 +267,8 @@ public static class HostStateApplier
             result.Skip($"{who} turn/phase", $"local turn {combat.TurnNumber} {combat.Phase} vs host turn {host.turnNumber} {host.phase} (flow state is not overridable)");
         }
 
-        if (combat.Energy != host.energy)
-        {
-            int target = Math.Max(0, Merge(host.energy, baseP?.energy, combat.Energy));
-            if (target != combat.Energy)
-            {
-                result.Fix($"{who} energy", $"{combat.Energy} -> {target}");
-                combat.Energy = target;
-            }
-        }
-        if (combat.Stars != host.stars)
-        {
-            int target = Math.Max(0, Merge(host.stars, baseP?.stars, combat.Stars));
-            if (target != combat.Stars)
-            {
-                result.Fix($"{who} stars", $"{combat.Stars} -> {target}");
-                combat.Stars = target;
-            }
-        }
+        ApplyScalar($"{who} energy", host.energy, baseP?.energy, combat.Energy, 0, turnMoved, v => combat.Energy = v, result);
+        ApplyScalar($"{who} stars", host.stars, baseP?.stars, combat.Stars, 0, turnMoved, v => combat.Stars = v, result);
 
         if (hostInCombat)
         {
@@ -656,7 +632,7 @@ public static class HostStateApplier
 
     // ------------------------------------------------------------- creatures
 
-    private static void ApplyCreatures(RunState run, NetFullCombatState host, NetFullCombatState? baseState, ResyncResult result)
+    private static void ApplyCreatures(RunState run, NetFullCombatState host, NetFullCombatState? baseState, bool turnMoved, ResyncResult result)
     {
         var combatState = run.Players[0].Creature.CombatState;
         var local = combatState?.Creatures;
@@ -684,40 +660,26 @@ public static class HostStateApplier
                 continue;
             }
             NetFullCombatState.CreatureState? b = baseState != null && baseState.Creatures.Count == local.Count ? baseState.Creatures[i] : null;
-            ApplyCreature(creature, h, b, result);
+            ApplyCreature(creature, h, b, turnMoved, result);
         }
     }
 
-    private static void ApplyCreature(Creature creature, NetFullCombatState.CreatureState host, NetFullCombatState.CreatureState? b, ResyncResult result)
+    private static void ApplyCreature(Creature creature, NetFullCombatState.CreatureState host, NetFullCombatState.CreatureState? b, bool turnMoved, ResyncResult result)
     {
         string who = $"creature {creature.LogName}";
 
-        if (creature.MaxHp != host.maxHp && SetMaxHp != null)
+        if (SetMaxHp != null)
         {
-            int target = Math.Max(1, Merge(host.maxHp, b?.maxHp, creature.MaxHp));
-            if (target != creature.MaxHp)
-            {
-                result.Fix($"{who} max hp", $"{creature.MaxHp} -> {target}");
-                SetMaxHp(creature, target);
-            }
+            ApplyScalar($"{who} max hp", host.maxHp, b?.maxHp, creature.MaxHp, 1, turnMoved, v => SetMaxHp(creature, v), result);
         }
-        if (creature.CurrentHp != host.currentHp && SetCurrentHp != null)
+        if (SetCurrentHp != null)
         {
-            int target = Math.Clamp(Merge(host.currentHp, b?.currentHp, creature.CurrentHp), 0, Math.Max(1, creature.MaxHp));
-            if (target != creature.CurrentHp)
-            {
-                result.Fix($"{who} hp", $"{creature.CurrentHp} -> {target}");
-                SetCurrentHp(creature, target);
-            }
+            ApplyScalar($"{who} hp", host.currentHp, b?.currentHp, creature.CurrentHp, 0, turnMoved, v => SetCurrentHp(creature, v), result,
+                max: Math.Max(1, creature.MaxHp));
         }
-        if (creature.Block != host.block && SetBlock != null)
+        if (SetBlock != null)
         {
-            int target = Math.Max(0, Merge(host.block, b?.block, creature.Block));
-            if (target != creature.Block)
-            {
-                result.Fix($"{who} block", $"{creature.Block} -> {target}");
-                SetBlock(creature, target);
-            }
+            ApplyScalar($"{who} block", host.block, b?.block, creature.Block, 0, turnMoved, v => SetBlock(creature, v), result);
         }
 
         var localPowers = creature.Powers.Select(p => new NetFullCombatState.PowerState { id = p.Id, amount = p.Amount }).ToList();
@@ -742,8 +704,12 @@ public static class HostStateApplier
                 {
                     baseAmount = null;
                 }
-                int target = Merge(hp.amount, baseAmount, power.Amount);
-                if (target != power.Amount)
+                var outcome = MergeScalar(hp.amount, baseAmount, power.Amount, turnMoved, out int target);
+                if (outcome == Merged.Defer)
+                {
+                    result.Skip($"{who} power {power.Id}", DeferReason);
+                }
+                else if (outcome == Merged.Write && target != power.Amount)
                 {
                     changes.Add($"{power.Id} {power.Amount} -> {target}");
                     power.SetAmount(target, silent: true);
@@ -797,8 +763,66 @@ public static class HostStateApplier
 
     // --------------------------------------------------------------- helpers
 
-    /// <summary>host + (now - base) when a checkpoint snapshot exists, otherwise the host value.</summary>
-    private static int Merge(int host, int? b, int now) => b.HasValue ? host + (now - b.Value) : host;
+    private enum Merged { Keep, Write, Defer }
+
+    private const string DeferReason =
+        "changed since the checkpoint while the turn moved on, so a turn-start reset may be in it; left for the next checkpoint";
+
+    /// <summary>
+    /// Three-way merge of one counter: <paramref name="host"/> and <paramref name="b"/> are the host's and our own value
+    /// at the checkpoint, <paramref name="now"/> is ours now.
+    /// </summary>
+    /// <remarks>
+    /// In step at the checkpoint: whatever happened since is our own, legitimately (<see cref="Merged.Keep"/>).
+    /// Untouched since the checkpoint: take the host's value. Otherwise re-apply our change on top of the host's,
+    /// <c>host + (now - base)</c>, except when the turn moved on, where the change may be an outright reset (energy
+    /// refilled to its maximum, block cleared) that the delta would apply twice: then wait for the next checkpoint.
+    /// </remarks>
+    private static Merged MergeScalar(int host, int? b, int now, bool turnMoved, out int target)
+    {
+        target = now;
+        if (b == null)
+        {
+            target = host;
+            return target == now ? Merged.Keep : Merged.Write;
+        }
+        if (b.Value == host)
+        {
+            return Merged.Keep;
+        }
+        if (now == b.Value)
+        {
+            target = host;
+            return Merged.Write;
+        }
+        if (turnMoved)
+        {
+            return Merged.Defer;
+        }
+        target = host + (now - b.Value);
+        return target == now ? Merged.Keep : Merged.Write;
+    }
+
+    /// <summary><see cref="MergeScalar"/> for one field, clamped, written through <paramref name="set"/> and reported.</summary>
+    private static void ApplyScalar(string what, int host, int? b, int now, int min, bool turnMoved, Action<int> set,
+        ResyncResult result, int max = int.MaxValue)
+    {
+        switch (MergeScalar(host, b, now, turnMoved, out int target))
+        {
+            case Merged.Keep:
+                return;
+            case Merged.Defer:
+                result.Skip(what, DeferReason);
+                return;
+        }
+        target = Math.Clamp(target, min, max);
+        if (target == now)
+        {
+            return;
+        }
+        set(target);
+        result.Fix(what, $"{now} -> {target}");
+    }
 
     private static NetFullCombatState.PlayerState? FindPlayer(NetFullCombatState? state, ulong id)
     {
