@@ -274,10 +274,12 @@ public static class CardIdDb
     }
 
     /// <summary>
-    /// Writes a planned rewrite, plus the IDs of the cards the rebuild created after planning (which the database gave
-    /// throwaway IDs of its own meanwhile). Returns how many cards now hold a different ID than before.
+    /// Writes a planned rewrite, plus the IDs of the cards the rebuild created after planning: <paramref name="created"/>
+    /// get the host's IDs, <paramref name="unkeyed"/> (no host ID for their slot) keep one they already have or get the
+    /// next free one, since a card without an ID throws as soon as it is played. Returns how many cards now hold a
+    /// different ID than before.
     /// </summary>
-    public static int Commit(CardIdRewrite plan, IReadOnlyList<(CardModel card, uint id)> created)
+    public static int Commit(CardIdRewrite plan, IReadOnlyList<(CardModel card, uint id)> created, IReadOnlyList<CardModel> unkeyed)
     {
         var db = NetCombatCardDb.Instance;
         var cardToId = (Dictionary<CardModel, uint>)CardToIdField!.GetValue(db)!;
@@ -285,6 +287,15 @@ public static class CardIdDb
 
         var next = new Dictionary<CardModel, uint>(plan.Next);
         foreach (var (card, id) in created) next[card] = id;
+        var used = next.Values.ToHashSet();
+        uint nextId = used.Select(id => id + 1).Append(plan.NextId).Max();
+        foreach (var card in unkeyed)
+        {
+            uint id = cardToId.TryGetValue(card, out var given) && !used.Contains(given) ? given : nextId;
+            next[card] = id;
+            used.Add(id);
+            nextId = Math.Max(nextId, id + 1);
+        }
         int changed = next.Count(kv => !cardToId.TryGetValue(kv.Key, out var old) || old != kv.Value);
 
         cardToId.Clear();
@@ -294,7 +305,7 @@ public static class CardIdDb
             cardToId[card] = id;
             idToCard[id] = card;
         }
-        NextIdField!.SetValue(db, plan.NextId);
+        NextIdField!.SetValue(db, nextId);
         return changed;
     }
 }

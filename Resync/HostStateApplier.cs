@@ -728,29 +728,59 @@ public static class HostStateApplier
             }
         }
 
-        var created = new List<(CardModel card, uint id)>();
-        foreach (var plan in ids.Piles)
+        // Create every missing card first. That is the only step here that can plausibly throw (deserializing a card),
+        // and if it does, nothing has changed yet except the cards just registered, which are taken out again.
+        var keyed = new List<(CardModel card, uint id)>();
+        var unkeyed = new List<CardModel>();
+        var placedByPlan = new List<List<(CardPile pile, CardModel card)>>();
+        var registered = new List<(PilePlan plan, CardModel card)>();
+        try
         {
-            var placed = new List<(CardPile pile, CardModel card)>();
-            int createdHere = 0;
-            foreach (var (pile, card, state, id) in plan.Slots)
+            foreach (var plan in ids.Piles)
             {
-                var placedCard = card;
-                if (placedCard == null)
+                var placed = new List<(CardPile pile, CardModel card)>();
+                foreach (var (pile, card, state, id) in plan.Slots)
                 {
-                    placedCard = CardModel.FromSerializable(state.card);
-                    // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for an
-                    // in-combat card the CombatState does not contain, so a run-scoped card would break on its next draw.
-                    plan.Scope.AddCard(placedCard, plan.Player);
-                    createdHere++;
-                    if (id != CardIdLayout.NoId)
+                    var placedCard = card;
+                    if (placedCard == null)
                     {
-                        created.Add((placedCard, id));
+                        placedCard = CardModel.FromSerializable(state.card);
+                        // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for
+                        // an in-combat card the CombatState does not contain, so a run-scoped card would break on its
+                        // next draw.
+                        plan.Scope.AddCard(placedCard, plan.Player);
+                        registered.Add((plan, placedCard));
+                        if (id != CardIdLayout.NoId)
+                        {
+                            keyed.Add((placedCard, id));
+                        }
+                        else
+                        {
+                            unkeyed.Add(placedCard);
+                        }
                     }
+                    placed.Add((pile, placedCard));
                 }
-                placed.Add((pile, placedCard));
+                placedByPlan.Add(placed);
             }
+        }
+        catch
+        {
+            foreach (var (plan, card) in registered)
+            {
+                plan.Scope.RemoveCard(card);
+            }
+            foreach (var plan in ids.Piles)
+            {
+                result.Skip($"{plan.Who} card piles", "not rebuilt: a card could not be created");
+            }
+            throw;
+        }
 
+        // Then the piles and the IDs, with nothing in between that calls out of this class.
+        for (int p = 0; p < ids.Piles.Count; p++)
+        {
+            var plan = ids.Piles[p];
             foreach (var pile in plan.Piles)
             {
                 foreach (var card in pile.Cards.ToList())
@@ -758,42 +788,54 @@ public static class HostStateApplier
                     pile.RemoveInternal(card, silent: true);
                 }
             }
-            foreach (var (pile, card) in placed)
+            foreach (var (pile, card) in placedByPlan[p])
             {
                 pile.AddInternal(card, -1, silent: true);
             }
-            foreach (var pile in plan.Piles)
-            {
-                pile.InvokeContentsChanged();
-            }
-            plan.Combat.RecalculateCardValues();
-            if (LocalContext.IsMe(plan.Player))
-            {
-                SyncHandView(plan.Combat.Hand, plan.Who, result);
-            }
-            string matched = ids.Host != null ? $"{plan.ById} by card ID, {plan.ByValue} by value, " : "";
-            result.Fix($"{plan.Who} card piles",
-                $"rebuilt from host ({matched}{createdHere} cards created, {plan.Leftovers.Count} removed)");
-
-            // Nothing here writes a card's own values, so a card whose cost, keywords, affliction or enchantment differ
-            // from every candidate stays different. Say so instead of letting the rebuild read as a full repair.
-            var after = plan.Piles.Select(NetFullCombatState.CombatPileState.From).ToList();
-            int stillDifferent = after.Zip(plan.Host.piles).Sum(p => p.First.cards.Zip(p.Second.cards).Count(c => !BytesEqual(c.First, c.Second)));
-            if (stillDifferent > 0)
-            {
-                result.Skip($"{plan.Who} card piles", $"{stillDifferent} card(s) still differ in cost, keywords, affliction or enchantment, which a resync cannot write");
-            }
         }
-
         if (rewrite != null)
         {
-            int changed = CardIdDb.Commit(rewrite, created);
+            int changed = CardIdDb.Commit(rewrite, keyed, unkeyed);
             uint after = CardIdDb.NextId ?? nowNext;
             if (changed > 0 || rewrite.Evicted > 0 || after != nowNext)
             {
                 string evicted = rewrite.Evicted > 0 ? $", {rewrite.Evicted} taken from cards no longer in play" : "";
                 result.Fix("card ids", $"{changed} card(s) re-keyed to the host's IDs{evicted}, next ID {nowNext} -> {after}");
             }
+        }
+
+        // Only now tell the piles' listeners (NetCombatCardDb, the UI). The IDs are in place, so a listener that throws
+        // cannot leave rebuilt piles with misplaced IDs behind; each pile gets its own guard.
+        foreach (var plan in ids.Piles)
+        {
+            foreach (var pile in plan.Piles)
+            {
+                Try(result, $"{plan.Who} {pile.Type} pile events", pile.InvokeContentsChanged);
+            }
+        }
+
+        foreach (var plan in ids.Piles)
+        {
+            plan.Combat.RecalculateCardValues();
+            int createdHere = registered.Count(r => r.plan == plan);
+            string matched = ids.Host != null ? $"{plan.ById} by card ID, {plan.ByValue} by value, " : "";
+            result.Fix($"{plan.Who} card piles",
+                $"rebuilt from host ({matched}{createdHere} cards created, {plan.Leftovers.Count} removed)");
+
+            // Nothing here writes a card's own values, so a card whose cost, keywords, affliction or enchantment differ
+            // from every candidate stays different. Say so instead of letting the rebuild read as a full repair.
+            var afterPiles = plan.Piles.Select(NetFullCombatState.CombatPileState.From).ToList();
+            int stillDifferent = afterPiles.Zip(plan.Host.piles).Sum(x => x.First.cards.Zip(x.Second.cards).Count(c => !BytesEqual(c.First, c.Second)));
+            if (stillDifferent > 0)
+            {
+                result.Skip($"{plan.Who} card piles", $"{stillDifferent} card(s) still differ in cost, keywords, affliction or enchantment, which a resync cannot write");
+            }
+        }
+
+        // The hand view last, on its own: the game state is complete by now, and a UI failure must not undo or skip it.
+        foreach (var plan in ids.Piles.Where(p => LocalContext.IsMe(p.Player)))
+        {
+            Try(result, $"{plan.Who} hand view", () => SyncHandView(plan.Combat.Hand, plan.Who, result));
         }
     }
 
