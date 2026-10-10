@@ -116,6 +116,12 @@ public static class OnReceivedStateDivergenceMessagePatch
                     LogStateDivergenceMethod!.Invoke(__instance, new[] { local!, message, senderId, index });
                 }
             }
+            catch (Exception e)
+            {
+                // Another mod's prefix or a StateDiverged subscriber threw; the echo may already have cost the client
+                // its strike. Carry on with our own handling rather than leave the divergence unrepaired.
+                MainFile.Logger.Warn($"Vanilla divergence logging failed, continuing: {(e as TargetInvocationException)?.InnerException ?? e}");
+            }
             finally
             {
                 VanillaHandlingInProgress = false;
