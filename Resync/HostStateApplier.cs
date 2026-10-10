@@ -108,20 +108,41 @@ public static class HostStateApplier
         }
     }
 
+    private const long MaxReplayedDraws = 10_000;
+
     private static void ApplyRng(Rng rng, SerializableRng host, SerializableRng? baseRng, string what, ResyncResult result)
     {
+        if (baseRng != null && BytesEqual(baseRng, host))
+        {
+            // In step with the host at the checkpoint; every draw since then is our own, legitimately.
+            return;
+        }
         long nowCounter = Counter(rng.ToSerializable());
-        long hostCounter = Counter(host);
-        long drawsSinceCheckpoint = baseRng != null ? Math.Max(0, nowCounter - Counter(baseRng)) : 0;
+        long draws = 0;
+        if (baseRng != null)
+        {
+            draws = nowCounter - Counter(baseRng);
+            if (draws < 0)
+            {
+                result.Skip(what, $"stream was reset since the checkpoint (counter {Counter(baseRng)} -> {nowCounter})");
+                return;
+            }
+            if (draws > MaxReplayedDraws)
+            {
+                result.Skip(what, $"{draws} local draws since the checkpoint, more than the {MaxReplayedDraws} replay limit");
+                return;
+            }
+        }
 
         rng.LoadFromSerializable(host);
-        // Each public Next* call advances the generator once and bumps the counter once, so replaying the local draws
-        // that happened after the checkpoint lands (approximately) where the host will be after the same actions.
-        for (long i = 0; i < drawsSinceCheckpoint && i < 10_000; i++)
+        // Every public Next* call steps the generator once and bumps the counter once, so replaying the local draws
+        // since the checkpoint lands exactly where the host will be after the same actions.
+        for (long i = 0; i < draws; i++)
         {
             rng.NextUnsignedLong();
         }
-        result.Fix(what, $"counter {nowCounter} -> {hostCounter}{(drawsSinceCheckpoint > 0 ? $" +{drawsSinceCheckpoint} local draws" : "")}");
+        result.Fix(what, $"counter {nowCounter} -> {Counter(rng.ToSerializable())}" +
+                         (draws > 0 ? $" (host {Counter(host)} + {draws} local draws)" : ""));
     }
 
     private static long Counter(SerializableRng rng) => rng.counter;
@@ -130,9 +151,10 @@ public static class HostStateApplier
 
     private static void ApplySyncMarkers(NetFullCombatState host, NetFullCombatState? baseState, ResyncResult result)
     {
+        // A list that matched the host at the checkpoint has only moved on through our own actions since: leave it.
         var choiceSync = RunManager.Instance.PlayerChoiceSynchronizer;
         var now = choiceSync.ChoiceIds.ToList();
-        if (!now.SequenceEqual(host.nextChoiceIds))
+        if (!now.SequenceEqual(host.nextChoiceIds) && baseState?.nextChoiceIds.SequenceEqual(host.nextChoiceIds) != true)
         {
             var target = MergeCounters<uint>(host.nextChoiceIds, baseState?.nextChoiceIds, now, (h, b, n) => (uint)(h + (n - b)));
             if (target != null)
@@ -148,7 +170,7 @@ public static class HostStateApplier
 
         var rewardSync = RunManager.Instance.RewardsSetSynchronizer;
         var nowRewards = rewardSync.GetNextRewardIds().ToList();
-        if (!nowRewards.SequenceEqual(host.nextRewardIds))
+        if (!nowRewards.SequenceEqual(host.nextRewardIds) && baseState?.nextRewardIds.SequenceEqual(host.nextRewardIds) != true)
         {
             var target = MergeCounters<int>(host.nextRewardIds, baseState?.nextRewardIds, nowRewards, (h, b, n) => (int)(h + (n - b)));
             if (target != null)
