@@ -25,8 +25,14 @@ Built against game `v0.111.0` (`41cef1ea`).
     never be recreated, and the client was kicked after 7 strikes.
 - v0.3.0 reworks the repair after a code review: stale divergence messages are ignored, counters
   are not merged across turn-start resets, card IDs are validated before any pile is rebuilt,
-  collections keep the host's order, and the hand view is synced. It builds and its self-test
-  scenarios were updated, but it has **not been run in game yet**.
+  collections keep the host's order, and the hand view is synced.
+- 2026-10-10, renamed to Slay the Divergence (mod ID `SlayTheDivergence`, console command
+  `divergence`), with on-screen notices and a per-run history, removal of enemies that already died
+  on the host, and orb-set repair (create and remove orbs, display synced). Tested in local
+  two- and three-window sessions (`tools/localmp.sh`): energy, block, powers, pile order, a lost card,
+  a lost orb, orbs evoked differently after a reorder, and an enemy removed on the host all healed, and
+  an uninvolved third player saw nothing. Not yet run in a real Steam session or with other mods.
+  Removing the last enemy (ending the combat) has only been run by the self-test.
 
 ## How vanilla detects and handles a desync
 
@@ -275,10 +281,12 @@ runs on the host only (in a fight with two or more enemies) and leaves the clien
 host no longer has. `loseorb` on a client makes the client recreate an orb; on the host, the client
 has to remove one. `divergence status` prints strike counts and the last resync result;
 `divergence demo <notice>` shows a notice with made-up content, and `divergence history [open|close]`
-prints and opens the history. `tools/localmp.sh` starts one host and N clients of the installed
-game over ENet on `127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
-`--fastmp=join --clientId=1001` developer shortcut. It looks for the macOS install by default; set
-`STS2_APP` elsewhere.
+prints and opens the history. `tools/localmp.sh` starts one host and N clients of the installed game on
+this machine over ENet on `127.0.0.1:33771`, using the game's `--fastmp=host_standard` /
+`--fastmp=join --clientId=1001` developer shortcut. Steam has to be running; the script passes the
+game its app ID so it starts outside Steam, and `--fastmp` saves under `default/<id>/`, apart from
+your Steam profiles. With the STS2_MCP mod installed, every window gets its own port (15526, 15527,
+...). It looks for the macOS install by default; set `STS2_APP` elsewhere.
 
 ## License
 
