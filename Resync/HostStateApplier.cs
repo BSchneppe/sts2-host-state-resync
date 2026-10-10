@@ -63,8 +63,8 @@ public static class HostStateApplier
         }
 
         // Turn setup assigns some values outright (ResetEnergy, block clearing) instead of changing them by an amount.
-        // Once a player's turn or phase moved on since the checkpoint, a local change to a counter may be one of
-        // those resets, and re-applying it as a delta on top of the host's value would be wrong.
+        // Once a player's turn or phase moved on since the checkpoint, those fields (energy, stars, block, power
+        // amounts) may hold a reset, which neither a delta nor "untouched since the checkpoint" can tell apart.
         bool turnMoved = baseState != null && baseState.Players.Any(bp =>
             run.GetPlayer(bp.playerId)?.PlayerCombatState is { } c && (c.TurnNumber != bp.turnNumber || c.Phase != bp.phase));
 
@@ -233,8 +233,8 @@ public static class HostStateApplier
     {
         string who = $"player {player.NetId}";
 
-        ApplyScalar($"{who} gold", host.gold, baseP?.gold, player.Gold, 0, turnMoved, v => player.Gold = v, result);
-        ApplyScalar($"{who} max potions", host.maxPotionCount, baseP?.maxPotionCount, player.MaxPotionCount, 0, turnMoved, v =>
+        ApplyScalar($"{who} gold", host.gold, baseP?.gold, player.Gold, 0, false, v => player.Gold = v, result);
+        ApplyScalar($"{who} max potions", host.maxPotionCount, baseP?.maxPotionCount, player.MaxPotionCount, 0, false, v =>
         {
             int diff = v - player.MaxPotionCount;
             if (diff > 0)
@@ -919,11 +919,11 @@ public static class HostStateApplier
 
         if (SetMaxHp != null)
         {
-            ApplyScalar($"{who} max hp", host.maxHp, b?.maxHp, creature.MaxHp, 1, turnMoved, v => SetMaxHp(creature, v), result);
+            ApplyScalar($"{who} max hp", host.maxHp, b?.maxHp, creature.MaxHp, 1, false, v => SetMaxHp(creature, v), result);
         }
         if (SetCurrentHp != null)
         {
-            ApplyScalar($"{who} hp", host.currentHp, b?.currentHp, creature.CurrentHp, 0, turnMoved, v => SetCurrentHp(creature, v), result,
+            ApplyScalar($"{who} hp", host.currentHp, b?.currentHp, creature.CurrentHp, 0, false, v => SetCurrentHp(creature, v), result,
                 max: Math.Max(1, creature.MaxHp));
         }
         if (SetBlock != null)
@@ -1025,7 +1025,7 @@ public static class HostStateApplier
     private enum Merged { Keep, Write, Defer }
 
     private const string DeferReason =
-        "changed since the checkpoint while the turn moved on, so a turn-start reset may be in it; left for the next checkpoint";
+        "the turn moved on since the checkpoint and turn setup may have reset it; left for the next checkpoint";
 
     /// <summary>
     /// Three-way merge of one counter: <paramref name="host"/> and <paramref name="b"/> are the host's and our own value
@@ -1033,11 +1033,13 @@ public static class HostStateApplier
     /// </summary>
     /// <remarks>
     /// In step at the checkpoint: whatever happened since is our own, legitimately (<see cref="Merged.Keep"/>).
-    /// Untouched since the checkpoint: take the host's value. Otherwise re-apply our change on top of the host's,
-    /// <c>host + (now - base)</c>, except when the turn moved on, where the change may be an outright reset (energy
-    /// refilled to its maximum, block cleared) that the delta would apply twice: then wait for the next checkpoint.
+    /// <paramref name="mayHaveReset"/> (the turn moved on and turn setup assigns this field outright: energy refilled
+    /// to its maximum, block cleared) means neither the value nor its change since the checkpoint can be trusted, even
+    /// when it looks untouched, since a reset can land on the old value: leave it to the next checkpoint unless it
+    /// already equals the host's. Otherwise: untouched since the checkpoint, take the host's value; changed, re-apply
+    /// our change on top of the host's, <c>host + (now - base)</c>.
     /// </remarks>
-    private static Merged MergeScalar(int host, int? b, int now, bool turnMoved, out int target)
+    private static Merged MergeScalar(int host, int? b, int now, bool mayHaveReset, out int target)
     {
         target = now;
         if (b == null)
@@ -1049,24 +1051,24 @@ public static class HostStateApplier
         {
             return Merged.Keep;
         }
+        if (mayHaveReset)
+        {
+            return now == host ? Merged.Keep : Merged.Defer;
+        }
         if (now == b.Value)
         {
             target = host;
             return Merged.Write;
-        }
-        if (turnMoved)
-        {
-            return Merged.Defer;
         }
         target = host + (now - b.Value);
         return target == now ? Merged.Keep : Merged.Write;
     }
 
     /// <summary><see cref="MergeScalar"/> for one field, clamped, written through <paramref name="set"/> and reported.</summary>
-    private static void ApplyScalar(string what, int host, int? b, int now, int min, bool turnMoved, Action<int> set,
+    private static void ApplyScalar(string what, int host, int? b, int now, int min, bool mayHaveReset, Action<int> set,
         ResyncResult result, int max = int.MaxValue)
     {
-        switch (MergeScalar(host, b, now, turnMoved, out int target))
+        switch (MergeScalar(host, b, now, mayHaveReset, out int target))
         {
             case Merged.Keep:
                 return;
