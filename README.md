@@ -22,7 +22,7 @@ Built against game `v0.111.0` (`41cef1ea`).
     never be recreated, and the client was kicked after 7 strikes.
 - v0.3.0 reworks the repair after a code review: stale divergence messages are ignored, counters
   are not merged across turn-start resets, card IDs are validated before any pile is rebuilt, orbs
-  are only reordered, collections keep the host's order, and the hand view is rebuilt. It builds and
+  are only reordered, collections keep the host's order, and the hand view is synced. It builds and
   its self-test scenarios were updated, but it has **not been run in game yet**.
 
 ## How vanilla detects and handles a desync
@@ -90,9 +90,9 @@ the client's own snapshot at N:
 
 - **Counters** (gold, max potions, energy, stars, HP, max HP, block, power amounts): left alone if
   they matched the host at N; set to the host's value if unchanged since N; otherwise
-  `host + (now - base)`, except when a player's turn or phase moved on since N, where the change
-  may be a turn-start reset (energy refill, block clearing) and the field waits for the next
-  checkpoint.
+  `host + (now - base)`. Once a player's turn or phase moved on since N, the fields turn setup can
+  reset outright (energy, stars, block, power amounts) wait for the next checkpoint instead, unless
+  they already equal the host's value: a reset can even land on the old value and look untouched.
 - **RNG streams and sync markers** (choice ids, reward ids): left alone if they matched at N;
   otherwise loaded from the host and advanced by the local draws since N (each draw is exactly one
   generator step).
@@ -102,9 +102,13 @@ the client's own snapshot at N:
   validated, and only then are both applied together (see below).
 
 The repair writes through the game's own mutators with `silent: true` or through private setters
-and fields: no gameplay hooks or VFX fire, and most UI is not told either. The hand view is rebuilt
-explicitly; potions, relics, powers and orbs may show their old order until they next change. Both
-sides get a short on-screen text and a full per-field log line tagged `[HostStateResync]`.
+and fields. The actions that would normally cause a change (card plays, power and relic triggers)
+do not run, so their hooks and VFX do not fire; a few setters still raise their own change events
+(energy, stars, power amounts). Most UI is not told. The hand view is synced explicitly: cards that
+left the hand lose their node, cards that came in get one at their place in the pile; cards already
+shown keep their order. The orb display is not synced, so its order and the front-orb highlight can
+be off until the orbs next change, and potion, relic and power displays may show their old order.
+Both sides get a short on-screen text and a full per-field log line tagged `[HostStateResync]`.
 
 ### Card IDs
 
@@ -139,7 +143,7 @@ repairable.
 | player energy, stars, gold, max potions | yes | public setters, `AddToMaxPotionCount` |
 | creature HP / max HP / block | yes | private setters via Harmony `PropertySetter` |
 | creature power amounts | yes | `PowerModel.SetAmount`; duplicate (instanced) powers matched one by one |
-| creature power set | yes, gated | `ApplyInternal` / `RemoveInternal`, then reordered to the host's order |
+| creature power set | yes, gated | `ApplyInternal` / `RemoveInternal`, then reordered to the host's order; a power the host has at amount 0 cannot be added |
 | potions | yes, gated | `AddPotionInternal` / `DiscardPotionInternal`, reordered within the occupied slots |
 | relics (set and saved-property counters) | yes, gated | `AddRelicInternal` / `RemoveRelicInternal` / `SavedProperties.Fill`, then reordered |
 | relic grab bag | yes, gated | `RelicGrabBag.LoadFromSerializable` |
@@ -147,7 +151,7 @@ repairable.
 | combat card IDs (`NetCombatCardDb`) | yes | the host's layout, validated before any pile changes |
 | next choice ids, next reward ids | yes | `FastForwardChoiceIds` / `FastForwardRewardIds` |
 | orb order | yes, gated | `OrbQueue.Remove/Insert` of the existing orbs |
-| orb values | partly | only state an orb accumulates itself (Dark's evoke, Glass's passive); the rest comes from Focus, relics and other mods' hooks |
+| orb values | partly | only Dark's evoke value, a plain field it accumulates itself; the rest comes from Focus, relics and other mods' hooks |
 | orb set (an orb missing or extra) | no | a created orb has no UI node (evoking it throws) and loses other mods' per-orb state |
 | card affliction / modified energy cost / keywords / enchantment | no | not writable; a mismatch left after the rebuild is reported as a skip |
 | creature set (different count or identity) | no | a monster that died or spawned on one side only |
@@ -162,6 +166,8 @@ repairable.
 - State that other mods keep per card or orb instance, outside `NetFullCombatState`, cannot be
   carried over when a card is created.
 - An HP repair can set a creature to 0 HP without the game's death handling.
+- A power the host has at amount 0 cannot be added (`ApplyInternal` ignores 0), so that difference
+  stays.
 - The snapshot does not say which potion slots the host's potions sit in, so potions are only
   reordered within the client's occupied slots.
 - Replays written after a resync do not reproduce, since the resync is not a recorded action.

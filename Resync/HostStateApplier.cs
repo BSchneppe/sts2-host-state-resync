@@ -41,7 +41,8 @@ namespace HostStateResync.Resync;
 /// <item>Card piles and card IDs: planned for every player, validated, then applied together (<see cref="CommitPiles"/>).</item>
 /// </list>
 /// Writes go through the game's own mutators with <c>silent: true</c>, private setters and private fields: no gameplay
-/// hooks or VFX fire, and most UI is not notified; the hand view is rebuilt explicitly (<see cref="SyncHandView"/>).
+/// hooks or VFX fire (a few setters still raise their change events), and most UI is not notified; the hand view is
+/// synced explicitly (<see cref="SyncHandView"/>).
 /// </summary>
 public static class HostStateApplier
 {
