@@ -11,6 +11,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Nodes.Cards;
@@ -840,9 +841,12 @@ public static class HostStateApplier
     }
 
     /// <summary>
-    /// NPlayerHand builds its card nodes from the pile commands, not from pile events, so a silent rebuild leaves it
-    /// showing the old hand: cards now in hand are invisible and unplayable, cards that left stay clickable (a play of
-    /// one is cancelled on both peers). When the shown cards differ from the Hand pile, rebuild the holders from it.
+    /// NPlayerHand builds its card nodes from the pile commands, not from pile events, so after a silent rebuild it can
+    /// show cards that left the hand (clickable, and their play is cancelled on both peers) and miss cards that are now
+    /// in it (invisible and unplayable). Bring the view in line with the Hand pile: drop the holders whose card left and
+    /// add one for each hand card that has none. <see cref="NPlayerHand.GetCardHolder"/> also finds the holders of
+    /// selected cards and of plays waiting in the queue, whose cards stay in the Hand pile until the play runs, so those
+    /// are left alone rather than duplicated.
     /// </summary>
     private static void SyncHandView(CardPile hand, string who, ResyncResult result)
     {
@@ -851,30 +855,49 @@ public static class HostStateApplier
         {
             return;
         }
-        var shown = view.ActiveHolders.Select(h => h.CardNode?.Model).ToList();
-        if (shown.SequenceEqual(hand.Cards))
-        {
-            return;
-        }
         if (view.InCardPlay || view.IsInCardSelection)
         {
-            result.Skip($"{who} hand view", "a card play or selection is in progress; the view catches up as cards move");
+            result.Skip($"{who} hand view", "a card is being played or selected; the view is left as it is");
             return;
         }
+
+        int removed = 0, added = 0;
         foreach (var holder in view.ActiveHolders.ToList())
         {
-            view.RemoveCardHolder(holder);
-        }
-        for (int i = 0; i < hand.Cards.Count; i++)
-        {
-            var node = NCard.Create(hand.Cards[i]);
-            if (node != null)
+            var node = holder.CardNode;
+            if (node?.Model == null || hand.Cards.Contains(node.Model))
             {
-                view.Add(node, i);
+                continue;
             }
+            // RemoveCardHolder detaches the card node without freeing it; hand it back to the node pool.
+            view.RemoveCardHolder(holder);
+            node.QueueFreeSafely();
+            removed++;
         }
-        view.ForceRefreshCardIndices();
-        result.Fix($"{who} hand view", $"rebuilt from the Hand pile ({hand.Cards.Count} cards)");
+        // A new card goes where the pile has it, counted among the holders shown, as GetHandInsertIndex does. The order
+        // of cards already shown is not changed.
+        var position = hand.Cards.Select((c, i) => (c, i)).ToDictionary(x => x.c, x => x.i);
+        foreach (var card in hand.Cards)
+        {
+            if (view.GetCardHolder(card) != null)
+            {
+                continue;
+            }
+            var node = NCard.Create(card);
+            if (node == null)
+            {
+                continue;
+            }
+            node.UpdateVisuals(PileType.Hand, CardPreviewMode.Normal);
+            int index = view.ActiveHolders.Count(h => h.CardNode?.Model is { } shown && position.TryGetValue(shown, out var at) && at < position[card]);
+            view.Add(node, index);
+            added++;
+        }
+        if (removed + added > 0)
+        {
+            view.ForceRefreshCardIndices();
+            result.Fix($"{who} hand view", $"{removed} stale card(s) removed, {added} added");
+        }
     }
 
     /// <summary>The card-ID side of one resync: the layouts it works from and every player's planned pile rebuild.</summary>
