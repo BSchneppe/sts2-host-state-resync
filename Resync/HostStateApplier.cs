@@ -13,6 +13,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Combat;
@@ -476,10 +477,14 @@ public static class HostStateApplier
     /// Orbs are only put back in the host's order, never created or destroyed. A created orb has no node in
     /// NOrbManager, so evoking it throws (EvokeOrbAnim looks its node up by model) before the evoke takes effect, and it
     /// loses whatever other mods keep per orb instance. Passive and evoke values are computed by hooks (Focus, relics,
-    /// other mods' per-orb bonuses), so they are not written either. The exception is state an orb accumulates in its
-    /// own private field (Dark's evoke value, Glass's passive value), which is moved by its difference to the host's.
-    /// Runs after the creatures, so a Focus difference is already repaired when the values are compared.
+    /// other mods' per-orb bonuses), so they are not written either, with one exception: Dark's evoke value is a plain
+    /// field the orb accumulates itself, with no hook on top, so it is moved by its divergence at the checkpoint
+    /// (host minus base), which keeps what it accumulated since.
     /// </summary>
+    /// <remarks>
+    /// "Changed locally since the checkpoint" compares which orbs there are and their order, not their values: the
+    /// values are recomputed from Focus and the like, which the creature repair may just have changed.
+    /// </remarks>
     private static void ApplyOrbs(PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
     {
         var queue = combat.OrbQueue;
@@ -488,10 +493,19 @@ public static class HostStateApplier
         {
             return;
         }
-        if (baseP != null && !ListBytesEqual(localOrbs, baseP.Value.orbs))
+        if (baseP != null && !queue.Orbs.Select(o => o.Id).SequenceEqual(baseP.Value.orbs.Select(o => o.id)))
         {
             result.Skip($"{who} orbs", "changed locally since checkpoint");
             return;
+        }
+        // Our own value of each orb at the checkpoint (same orbs in the same order, as just checked).
+        var baseOf = new Dictionary<OrbModel, NetFullCombatState.OrbState>();
+        if (baseP != null)
+        {
+            for (int i = 0; i < queue.Orbs.Count; i++)
+            {
+                baseOf[queue.Orbs[i]] = baseP.Value.orbs[i];
+            }
         }
 
         // Our orbs in the host's order: an orb with the host's values first, then any orb of that type.
@@ -535,8 +549,11 @@ public static class HostStateApplier
         for (int i = 0; i < order.Count; i++)
         {
             var orb = order[i];
-            if (Nudge(orb, "_evokeVal", host.orbs[i].evoke - (int)orb.EvokeVal)) changes.Add($"{orb.Id} evoke");
-            if (Nudge(orb, "_passiveVal", host.orbs[i].passive - (int)orb.PassiveVal)) changes.Add($"{orb.Id} passive");
+            int drift = baseOf.TryGetValue(orb, out var b) ? host.orbs[i].evoke - b.evoke : host.orbs[i].evoke - (int)orb.EvokeVal;
+            if (orb is DarkOrb && drift != 0 && Nudge(orb, "_evokeVal", drift))
+            {
+                changes.Add($"{orb.Id} evoke {drift:+0;-0}");
+            }
         }
         if (changes.Count > 0)
         {
@@ -549,13 +566,9 @@ public static class HostStateApplier
         }
     }
 
-    /// <summary>
-    /// Moves a decimal field the orb type itself declares by <paramref name="delta"/>. Hook modifiers on top of it are
-    /// additive, so shifting the field shifts the computed value by the same amount.
-    /// </summary>
+    /// <summary>Moves a decimal field the orb type itself declares by <paramref name="delta"/>.</summary>
     private static bool Nudge(OrbModel orb, string field, int delta)
     {
-        if (delta == 0) return false;
         var info = orb.GetType().GetField(field, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
         if (info == null || info.FieldType != typeof(decimal)) return false;
         info.SetValue(orb, (decimal)info.GetValue(orb)! + delta);
