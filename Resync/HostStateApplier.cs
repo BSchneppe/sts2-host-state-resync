@@ -468,13 +468,8 @@ public static class HostStateApplier
             return;
         }
 
-        // Pool every local combat card, then hand them out to the host's piles in the host's order: the card holding
-        // the host's ID for that slot when it is the same card, otherwise the closest by value (which then takes over
-        // that ID in ApplyCardIds).
-        var db = NetCombatCardDb.Instance;
-        var pool = localPiles.SelectMany(p => p.Cards).ToList();
-        var assignments = new List<(CardPile pile, List<CardModel> cards)>();
-        int created = 0, byId = 0, byValue = 0;
+        // Every slot of the host's piles, in the host's order, with the host's card ID where we have one.
+        var slots = new List<(CardPile pile, NetFullCombatState.CardState card, uint id)>();
         foreach (var hostPile in host.piles)
         {
             var pile = localPiles.FirstOrDefault(p => p.Type == hostPile.pileType);
@@ -489,39 +484,76 @@ public static class HostStateApplier
                 result.Skip($"{who} pile {hostPile.pileType} ids", $"{hostIds.Count} IDs for {hostPile.cards.Count} cards");
                 hostIds = null;
             }
-            var cards = new List<CardModel>();
             for (int i = 0; i < hostPile.cards.Count; i++)
             {
-                var hostCard = hostPile.cards[i];
-                uint hostId = hostIds?[i] ?? CardIdLayout.NoId;
-                CardModel? match = null;
-                CardModel? holder = null;
-                if (hostId != CardIdLayout.NoId && db.TryGetCard(hostId, out holder) && holder != null &&
-                    SameCard(holder, hostCard.card) && pool.Remove(holder))
-                {
-                    match = holder;
-                    byId++;
-                }
-                match ??= TakeMatch(pool, hostCard.card);
-                if (match == null)
-                {
-                    match = CardModel.FromSerializable(hostCard.card);
-                    // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for an
-                    // in-combat card the CombatState does not contain, so a run-scoped card would break on its next draw.
-                    combatScope.AddCard(match, player);
-                    created++;
-                }
-                else if (hostId != CardIdLayout.NoId && match != holder)
-                {
-                    byValue++;
-                }
-                if (hostId != CardIdLayout.NoId)
-                {
-                    ids.Assign.Add((match, hostId));
-                }
-                cards.Add(match);
+                slots.Add((pile, hostPile.cards[i], hostIds?[i] ?? CardIdLayout.NoId));
             }
-            assignments.Add((pile, cards));
+        }
+
+        // Hand our cards out to those slots in passes, strictest first and across all slots, so that a loose match for
+        // one slot never takes the card a stricter pass would have given another: the same card state (card, affliction,
+        // cost, keywords) held under the host's ID, the same state under any ID, the same card and upgrade under the
+        // host's ID, the same card and upgrade. Whatever takes a slot under another ID is re-keyed in ApplyCardIds.
+        var db = NetCombatCardDb.Instance;
+        var pool = localPiles.SelectMany(p => p.Cards).ToList();
+        var states = pool.ToDictionary(c => c, NetFullCombatState.CardState.From);
+        var picks = new CardModel?[slots.Count];
+        bool Holds(CardModel c, uint id) => id != CardIdLayout.NoId && db.TryGetCard(id, out var holder) && holder == c;
+        bool Exact(CardModel c, NetFullCombatState.CardState s) => BytesEqual(states[c], s);
+        foreach (var pass in new Func<CardModel, int, bool>[]
+                 {
+                     (c, i) => Exact(c, slots[i].card) && Holds(c, slots[i].id),
+                     (c, i) => Exact(c, slots[i].card),
+                     (c, i) => SameCard(c, slots[i].card.card) && Holds(c, slots[i].id),
+                     (c, i) => SameCard(c, slots[i].card.card),
+                 })
+        {
+            for (int i = 0; i < slots.Count; i++)
+            {
+                if (picks[i] != null)
+                {
+                    continue;
+                }
+                var match = pool.FirstOrDefault(c => pass(c, i));
+                if (match != null)
+                {
+                    picks[i] = match;
+                    pool.Remove(match);
+                }
+            }
+        }
+
+        var assignments = new List<(CardPile pile, List<CardModel> cards)>();
+        int created = 0, byId = 0, byValue = 0;
+        for (int i = 0; i < slots.Count; i++)
+        {
+            var (pile, hostCard, hostId) = slots[i];
+            var match = picks[i];
+            if (match == null)
+            {
+                match = CardModel.FromSerializable(hostCard.card);
+                // The combat scope, as CombatState.CreateCard does: CardPileCmd.Add and manual plays throw for an
+                // in-combat card the CombatState does not contain, so a run-scoped card would break on its next draw.
+                combatScope.AddCard(match, player);
+                created++;
+            }
+            else if (Holds(match, hostId))
+            {
+                byId++;
+            }
+            else if (hostId != CardIdLayout.NoId)
+            {
+                byValue++;
+            }
+            if (hostId != CardIdLayout.NoId)
+            {
+                ids.Assign.Add((match, hostId));
+            }
+            if (assignments.Count == 0 || assignments[^1].pile != pile)
+            {
+                assignments.Add((pile, new List<CardModel>()));
+            }
+            assignments[^1].cards.Add(match);
         }
         ids.Forget.AddRange(pool);
 
@@ -547,6 +579,15 @@ public static class HostStateApplier
         combat.RecalculateCardValues();
         string matched = ids.Host != null ? $"{byId} by card ID, {byValue} by value, " : "";
         result.Fix($"{who} card piles", $"rebuilt from host ({matched}{created} cards created, {removed} removed)");
+
+        // Nothing here writes a card's own values, so a card whose cost, keywords, affliction or enchantment differ
+        // from every candidate stays different. Say so instead of letting the rebuild read as a full repair.
+        var after = localPiles.Select(NetFullCombatState.CombatPileState.From).ToList();
+        int stillDifferent = after.Zip(host.piles).Sum(p => p.First.cards.Zip(p.Second.cards).Count(c => !BytesEqual(c.First, c.Second)));
+        if (stillDifferent > 0)
+        {
+            result.Skip($"{who} card piles", $"{stillDifferent} card(s) still differ in cost, keywords, affliction or enchantment, which a resync cannot write");
+        }
     }
 
     private static bool SameCard(CardModel card, SerializableCard wanted) =>
@@ -604,30 +645,6 @@ public static class HostStateApplier
         public uint? NowNext { get; }
         public List<(CardModel card, uint id)> Assign { get; } = new();
         public List<CardModel> Forget { get; } = new();
-    }
-
-    /// <summary>
-    /// Byte-exact match first (SerializableCard.Equals ignores the floor the card was added on, which is part of the
-    /// checksum), then the game's own equality, then same card id and upgrade level.
-    /// </summary>
-    private static CardModel? TakeMatch(List<CardModel> pool, SerializableCard wanted)
-    {
-        int idx = pool.FindIndex(c => BytesEqual(c.ToSerializable(), wanted));
-        if (idx < 0)
-        {
-            idx = pool.FindIndex(c => wanted.Equals(c.ToSerializable()));
-        }
-        if (idx < 0)
-        {
-            idx = pool.FindIndex(c => c.Id == wanted.Id && c.CurrentUpgradeLevel == wanted.CurrentUpgradeLevel);
-        }
-        if (idx < 0)
-        {
-            return null;
-        }
-        var card = pool[idx];
-        pool.RemoveAt(idx);
-        return card;
     }
 
     // ------------------------------------------------------------- creatures
