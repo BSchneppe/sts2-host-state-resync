@@ -1425,12 +1425,29 @@ public sealed class ResyncResult
     public uint ChecksumId { get; }
     public bool HadBaseline { get; }
     public int FixedCount => _fixed.Count;
+    public int SkippedCount => _skipped.Count;
+    public int FailedCount => _failed.Count;
 
     /// <summary>An enemy removal left no living enemy, so the combat may be over; <see cref="HostStateApplier.Apply"/> checks last.</summary>
     public bool NeedsWinCheck { get; set; }
 
-    public void Fix(string what, string detail) => _fixed.Add($"{what}: {detail}");
-    public void Skip(string what, string why) => _skipped.Add($"{what}: {why}");
+    /// <summary>The fixes as (what, detail) pairs, for the on-screen notice.</summary>
+    public List<(string What, string Detail)> Fixes { get; } = new();
+
+    public void Fix(string what, string detail)
+    {
+        _fixed.Add($"{what}: {detail}");
+        Fixes.Add((what, detail));
+    }
+
+    /// <summary>The skips as (what, why) pairs, for the on-screen notice.</summary>
+    public List<(string What, string Why)> Skips { get; } = new();
+
+    public void Skip(string what, string why)
+    {
+        _skipped.Add($"{what}: {why}");
+        Skips.Add((what, why));
+    }
 
     public void Fail(string what, Exception e)
     {
@@ -1441,24 +1458,11 @@ public sealed class ResyncResult
     public string ToLogString()
     {
         var sb = new StringBuilder();
-        sb.Append($"[SlayTheDivergence] checksum #{ChecksumId}: applied {_fixed.Count} fix(es), skipped {_skipped.Count}, failed {_failed.Count}");
+        sb.Append($"checksum #{ChecksumId}: applied {_fixed.Count} fix(es), skipped {_skipped.Count}, failed {_failed.Count}");
         sb.Append(HadBaseline ? " (three-way merge against our own checkpoint snapshot)" : " (no local checkpoint snapshot; host values applied as-is)");
         foreach (var f in _fixed) sb.Append("\n  fixed   ").Append(f);
         foreach (var s in _skipped) sb.Append("\n  skipped ").Append(s);
         foreach (var f in _failed) sb.Append("\n  FAILED  ").Append(f);
         return sb.ToString();
-    }
-
-    public string ToScreenString()
-    {
-        if (_fixed.Count == 0 && _skipped.Count == 0 && _failed.Count == 0)
-        {
-            return $"Desync #{ChecksumId}: nothing visible differed from the host";
-        }
-        var parts = new List<string>();
-        if (_fixed.Count > 0) parts.Add($"{_fixed.Count} fixed");
-        if (_skipped.Count > 0) parts.Add($"{_skipped.Count} left alone");
-        if (_failed.Count > 0) parts.Add($"{_failed.Count} failed");
-        return $"Desync #{ChecksumId}: resynced from host ({string.Join(", ", parts)})";
     }
 }

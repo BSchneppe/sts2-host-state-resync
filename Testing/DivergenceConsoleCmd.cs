@@ -32,11 +32,14 @@ namespace SlayTheDivergence.Testing;
 /// the next checkpoint diverges and the mod has to heal it for real.
 ///
 /// <c>divergence status</c>: host strike counters and the last resync result.
+///
+/// <c>divergence demo &lt;notice&gt;</c>: shows one of the on-screen notices with made-up content, to check how they look
+/// without a real desync. <c>divergence history [open|close]</c> prints this run's notices and opens or closes the history list.
 /// </summary>
 public class DivergenceConsoleCmd : AbstractConsoleCmd
 {
     public override string CmdName => "divergence";
-    public override string Args => "selftest [scenario] | desync <kind> | list | status";
+    public override string Args => "selftest [scenario] | desync <kind> | demo <notice> | history [open|close] | list | status";
     public override string Description => "Slay the Divergence: self-test the resync against a synthetic host snapshot, or drift this peer on purpose.";
     public override bool IsNetworked => false;
 
@@ -216,6 +219,13 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
     /// <summary>Self-test scenarios left out of a full run because they end the fight.</summary>
     private static readonly HashSet<string> NamedOnly = new(StringComparer.OrdinalIgnoreCase) { "dropallenemies" };
 
+    /// <summary>Drift kinds the host-side summary must describe with at least one specific line.</summary>
+    private static readonly HashSet<string> HostVisible = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "energy", "gold", "hp", "block", "power", "shuffle", "card", "potion", "relic", "orb", "losecard", "losepower",
+        "loseorb", "dropenemy",
+    };
+
     private static List<int> LivingEnemySlots(NetFullCombatState truth, Player p)
     {
         var live = p.Creature.CombatState?.Creatures ?? throw new Unavailable("need a combat");
@@ -242,6 +252,26 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                                                         "\nSelf-test scenarios: " + string.Join(", ", SelfTestKinds));
                 case "status":
                     return new CmdResult(success: true, Status());
+                case "history":
+                    if (args.Length >= 2)
+                    {
+                        bool open = args[1].Equals("open", StringComparison.OrdinalIgnoreCase);
+                        if (!open && !args[1].Equals("close", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return new CmdResult(success: false, "Usage: divergence history [open|close]");
+                        }
+                        Ui.ToastLayer.SetHistoryOpen(open);
+                    }
+                    return new CmdResult(success: true, Ui.ResyncHistory.Describe());
+                case "demo":
+                {
+                    if (args.Length < 2 || !Ui.ResyncNotices.DemoKinds.Contains(args[1].ToLowerInvariant()))
+                    {
+                        return new CmdResult(success: false, "Usage: divergence demo <kind>; kinds: " + string.Join(", ", Ui.ResyncNotices.DemoKinds));
+                    }
+                    Ui.ResyncNotices.Demo(args[1].ToLowerInvariant());
+                    return new CmdResult(success: true, $"Showing the {args[1]} notice.");
+                }
                 case "desync":
                 {
                     if (args.Length < 2 || !Perturbations.TryGetValue(args[1], out var perturb))
@@ -282,7 +312,7 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
         }
     }
 
-    private static readonly string[] Subcommands = { "selftest", "desync", "list", "status" };
+    private static readonly string[] Subcommands = { "selftest", "desync", "demo", "history", "list", "status" };
 
     /// <summary>Tab completion: the subcommand first, then the drift kind after <c>desync</c> or <c>selftest</c>.</summary>
     public override CompletionResult GetArgumentCompletions(Player? player, string[] args)
@@ -298,6 +328,14 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
         if (args.Length == 2 && args[0].Equals("selftest", StringComparison.OrdinalIgnoreCase))
         {
             return CompleteArgument(SelfTestKinds.OrderBy(k => k), new[] { args[0] }, args[1]);
+        }
+        if (args.Length == 2 && args[0].Equals("history", StringComparison.OrdinalIgnoreCase))
+        {
+            return CompleteArgument(new[] { "open", "close" }, new[] { args[0] }, args[1]);
+        }
+        if (args.Length == 2 && args[0].Equals("demo", StringComparison.OrdinalIgnoreCase))
+        {
+            return CompleteArgument(Ui.ResyncNotices.DemoKinds, new[] { args[0] }, args[1]);
         }
         return new CompletionResult { Type = CompletionType.Argument, ArgumentContext = CmdName };
     }
@@ -353,6 +391,10 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                     sb.AppendLine($"{name}: SKIP (perturbation changed neither the checksum nor the card IDs)");
                     continue;
                 }
+                // What the host's notice would say about this drift (it compares its snapshot with the client's).
+                var hostView = Ui.ResyncWording.Lines(StateDiff.Describe(truth, drifted), me.NetId, id => $"Player {id}");
+                bool hostViewOk = !HostVisible.Contains(name) || hostView.Any(l => !l.StartsWith("Other values differ", StringComparison.Ordinal));
+
                 var result = HostStateApplier.Apply(run, truth, drifted, fakeId++, truthIds, driftedIds);
                 LastResult = result;
                 if (name.Equals("dropallenemies", StringComparison.OrdinalIgnoreCase))
@@ -374,12 +416,13 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                     .All(c => me.Creature.CombatState?.ContainsCard(c) == true);
                 // An orb without its node throws on its next evoke.
                 bool orbViewOk = HostStateApplier.OrbViewMatches(me);
-                bool pass = sumOk && idsOk && scopeOk && orbViewOk;
+                bool pass = sumOk && idsOk && scopeOk && orbViewOk && hostViewOk;
                 all &= pass;
                 sb.AppendLine($"{name}: {(pass ? "PASS" : "FAIL")} ({result.FixedCount} fix(es)" +
                               $"{(sumOk ? "" : ", checksum differs")}{(idsOk ? "" : ", card IDs differ")}" +
                               $"{(scopeOk ? "" : ", a card is not in the combat scope")}" +
-                              $"{(orbViewOk ? "" : ", the orb display does not match the orbs")}");
+                              $"{(orbViewOk ? "" : ", the orb display does not match the orbs")}" +
+                              $"{(hostViewOk ? "" : $", the host notice has no details ({string.Join("; ", hostView)})")})");
                 if (!sumOk)
                 {
                     sb.AppendLine(Diff(truth.ToString(), after.ToString()));

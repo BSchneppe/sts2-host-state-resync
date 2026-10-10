@@ -43,6 +43,6 @@ public static class Settings
     /// </summary>
     public const int MaxConsecutiveStrikes = 6;
 
-    /// <summary>Show a short on-screen text when a resync happens (both on host and client).</summary>
+    /// <summary>Show the resync notices (toasts and the history pill) on host and client. The log is written either way.</summary>
     public static bool ShowOnScreenText = true;
 }

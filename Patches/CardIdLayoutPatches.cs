@@ -26,6 +26,7 @@ public static class ChecksumTrackerCtorPatch
             DivergenceStrikes.Clear();
             __instance.ChecksumGenerated += (data, _, _) => Record(data, runState);
             netService.RegisterMessageHandler(Handler);
+            Ui.ResyncHistory.Clear();
         }
         catch (Exception e)
         {
@@ -66,5 +67,7 @@ public static class ChecksumTrackerDisposePatch
         {
             ChecksumTrackerCtorPatch.Unregister(netService);
         }
+        // Leaving the run: the resync pill and history do not belong on the menu.
+        Ui.ToastLayer.HideForMenu();
     }
 }

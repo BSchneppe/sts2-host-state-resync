@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using SlayTheDivergence.Resync;
+using SlayTheDivergence.Ui;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
@@ -48,6 +49,22 @@ public static class OnReceivedStateDivergenceMessagePatch
     /// lets the vanilla error popup through.
     /// </summary>
     public static bool VanillaHandlingInProgress { get; private set; }
+
+    /// <summary>Host: what the client's copy of the checkpoint has different from ours, for the notice. Never throws.</summary>
+    private static List<(string What, string Detail)>? DriftOf(object? local, StateDivergenceMessage message)
+    {
+        try
+        {
+            return local != null && TrackedFullStateField!.GetValue(local) is NetFullCombatState ours
+                ? StateDiff.Describe(ours, message.senderCombatState)
+                : null;
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Could not describe the client's drift: {e.Message}");
+            return null;
+        }
+    }
 
     public static bool Prefix(ChecksumTracker __instance, StateDivergenceMessage message, ulong senderId)
     {
@@ -92,10 +109,11 @@ public static class OnReceivedStateDivergenceMessagePatch
             }
 
             bool kick = false;
+            int strikes = 0;
             committed = true;
             if (netService.Type == NetGameType.Host)
             {
-                int strikes = DivergenceStrikes.Record(senderId);
+                strikes = DivergenceStrikes.Record(senderId);
                 kick = strikes > Settings.MaxConsecutiveStrikes;
                 MainFile.Logger.Warn(kick
                     ? $"Client {senderId} diverged {strikes} times in a row without a matching checksum; giving up and disconnecting it (vanilla behaviour)"
@@ -133,10 +151,11 @@ public static class OnReceivedStateDivergenceMessagePatch
                 {
                     (netService as NetHostGameService)?.DisconnectClient(senderId, NetError.StateDivergence);
                     DivergenceStrikes.Forget(senderId);
+                    ResyncNotices.Kicked(senderId, strikes, netService);
                 }
                 else
                 {
-                    ScreenText.Show($"Player {senderId} desynced at checksum #{id}, resyncing them from our state");
+                    ResyncNotices.Repairing(senderId, strikes, netService, DriftOf(local, message));
                 }
                 return false;
             }
@@ -167,7 +186,7 @@ public static class OnReceivedStateDivergenceMessagePatch
             Testing.DivergenceConsoleCmd.LastResult = result;
 #endif
             MainFile.Logger.Info(result.ToLogString());
-            ScreenText.Show(result.ToScreenString());
+            ResyncNotices.Resynced(result, netService);
             return false;
         }
         catch (Exception e)
@@ -227,16 +246,23 @@ public static class CompareChecksumsPatch
         }
     }
 
-    public static void Postfix(object localChecksum, NetChecksumData remoteChecksum, ulong remoteId)
+    public static void Postfix(ChecksumTracker __instance, object localChecksum, NetChecksumData remoteChecksum, ulong remoteId)
     {
         if (TrackedDataField == null)
         {
             return;
         }
-        var local = (NetChecksumData)TrackedDataField.GetValue(localChecksum)!;
-        if (local.id == remoteChecksum.id && local.checksum == remoteChecksum.checksum)
+        try
         {
-            DivergenceStrikes.Reset(remoteId);
+            var local = (NetChecksumData)TrackedDataField.GetValue(localChecksum)!;
+            if (local.id == remoteChecksum.id && local.checksum == remoteChecksum.checksum && DivergenceStrikes.Reset(remoteId))
+            {
+                ResyncNotices.Recovered(remoteId, NetServiceField?.GetValue(__instance) as INetGameService);
+            }
+        }
+        catch (Exception e)
+        {
+            MainFile.Logger.Warn($"Could not process a matching checksum from {remoteId}: {e.Message}");
         }
     }
 }
@@ -297,12 +323,15 @@ public static class DivergenceStrikes
 
     public static string Describe() => Strikes.Count == 0 ? "none" : string.Join(", ", Strikes.Select(kv => $"{kv.Key}: {kv.Value}"));
 
-    public static void Reset(ulong clientId)
+    /// <returns>Whether the client had strikes, so this match ends a divergence.</returns>
+    public static bool Reset(ulong clientId)
     {
-        if (Strikes.Remove(clientId))
+        if (!Strikes.Remove(clientId))
         {
-            MainFile.Logger.Info($"Client {clientId} produced a matching checksum again; divergence strikes reset");
+            return false;
         }
+        MainFile.Logger.Info($"Client {clientId} produced a matching checksum again; divergence strikes reset");
+        return true;
     }
 }
 

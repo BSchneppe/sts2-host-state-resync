@@ -110,8 +110,8 @@ do not run, so their hooks and VFX do not fire; a few setters still raise their 
 (energy, stars, power amounts). Most UI is not told. The hand view is synced explicitly: cards that
 left the hand lose their node, cards that came in get one at their place in the pile; cards already
 shown keep their order. The orb display is synced slot by slot. Potion, relic and power displays
-may show their old order until they next change. Both sides get a short on-screen text and a full
-per-field log line tagged `[SlayTheDivergence]`.
+may show their old order until they next change. Both sides get an on-screen notice (see
+"Notices") and a full per-field log line tagged `[SlayTheDivergence]`.
 
 ### Card IDs
 
@@ -132,6 +132,18 @@ locally since N move with the counter (`host + (now - base)`).
 
 The new message changes the game's network message numbering (mod message types are sorted in
 with the game's own), which is one more reason every player needs the same version.
+
+### Notices
+
+Every resync shows a toast in the top-right corner (`Ui/ToastLayer.cs`). It slides in, counts down
+on a thin bar, pauses while hovered, closes on ×, and a repeat of the same event updates the visible
+toast instead of stacking. Clicks go through a toast to the game (enemies under it stay
+targetable); only × takes them. The client's toast lists what was repaired in plain words
+("Energy 5 → 2", "Nibbit removed") and what could not be. The host's toast lists what the client
+had drifted on, from comparing its own snapshot with the copy the client echoes back
+(`Resync/StateDiff.cs`); from three divergences in a row it turns into a warning, and when the
+client's checksums match again it turns into "back in sync". A pill above the toasts opens this
+run's history. Debug builds add `divergence demo <notice>` and `divergence history [open|close]`.
 
 ## Which divergences are fixable
 
@@ -178,6 +190,8 @@ repairable.
   are close in HP and one died on the host, the wrong copy can be removed.
 - An orb created by a resync starts without other mods' per-orb state, and is not counted in the
   combat history as channeled. If the host has more orbs than we have slots, orbs are not repaired.
+- If neither creatures nor orbs are what drifted, but values the host summary does not compare (relic
+  counters, card details), the host's notice says only that other values differ.
 - A power the host has at amount 0 cannot be added (`ApplyInternal` ignores 0), so that difference
   stays.
 - The snapshot does not say which potion slots the host's potions sit in, so potions are only
@@ -244,14 +258,14 @@ drift kind it snapshots the live state as the "host truth", drifts the live stat
 diverged client would look, snapshots that as the client's own checkpoint, runs
 `HostStateApplier.Apply`, and asserts that the live state hashes back to the truth with the game's
 own `ChecksumTracker.GenerateChecksum`, that every combat card ID is back in its slot, that every
-card in the piles belongs to the combat scope, and that the orb display shows the orbs. The
-kinds: energy, gold, run RNG, player RNG, enemy HP, block, power amount, pile order, extra card,
-potion, relic, orb order, choice ids, two identical cards swapping places (`swapids`), a
-vanished card (`losecard`), a vanished power (`losepower`) and a vanished orb (`loseorb`). Two
-scenarios change the host snapshot instead: `dropenemy` (an enemy only we still have; needs two
-living enemies) and `dropallenemies` (every enemy; the combat ends, so it only runs when named).
-`removeenemy` is co-op only. A kind whose precondition is missing (an empty draw pile, no free
-potion slot) reports SKIP. The full run adds `energy-delta`, a lockstep
+card in the piles belongs to the combat scope, that the orb display shows the orbs, and that the
+host's notice would describe the drift. The kinds: energy, gold, run RNG, player RNG, enemy HP,
+block, power amount, pile order, extra card, potion, relic, orb order, choice ids, two identical
+cards swapping places (`swapids`), a vanished card (`losecard`), a vanished power (`losepower`) and
+a vanished orb (`loseorb`). Two scenarios change the host snapshot instead: `dropenemy` (an enemy
+only we still have; needs two living enemies) and `dropallenemies` (every enemy; the combat ends, so
+it only runs when named). `removeenemy` is co-op only. A kind whose precondition is missing (an
+empty draw pile, no free potion slot) reports SKIP. The full run adds `energy-delta`, a lockstep
 action after the checkpoint that the merge has to keep. `divergence selftest <kind>` runs one;
 failures print a line diff of the two state dumps and of the two ID layouts.
 
@@ -259,9 +273,10 @@ failures print a line diff of the two state dumps and of the two ID layouts.
 networked), so the next checkpoint diverges for real. Run it on a client, except `removeenemy`, which
 runs on the host only (in a fight with two or more enemies) and leaves the client with a monster the
 host no longer has. `loseorb` on a client makes the client recreate an orb; on the host, the client
-has to remove one. `divergence status` prints strike counts and the last resync result.
-`tools/localmp.sh` starts one host and N clients of the installed game over ENet on
-`127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
+has to remove one. `divergence status` prints strike counts and the last resync result;
+`divergence demo <notice>` shows a notice with made-up content, and `divergence history [open|close]`
+prints and opens the history. `tools/localmp.sh` starts one host and N clients of the installed
+game over ENet on `127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
 `--fastmp=join --clientId=1001` developer shortcut. It looks for the macOS install by default; set
 `STS2_APP` elsewhere.
 
