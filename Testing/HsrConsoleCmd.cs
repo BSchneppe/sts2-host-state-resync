@@ -13,6 +13,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace HostStateResync.Testing;
@@ -21,7 +22,7 @@ namespace HostStateResync.Testing;
 /// Dev-console command <c>hsr</c>. Discovered automatically by the game's <c>DevConsole</c>, which scans mod assemblies
 /// for <see cref="AbstractConsoleCmd"/> subclasses; debug commands are enabled whenever the game runs modded.
 ///
-/// <c>hsr selftest</c>: in any combat (singleplayer works), for each scenario: snapshot the current state as the
+/// <c>hsr selftest</c>: in a singleplayer combat (it refuses co-op), for each scenario: snapshot the current state as the
 /// "host truth", perturb the live state as if this peer had drifted, snapshot that as the peer's own checkpoint,
 /// run <see cref="HostStateApplier"/> and check that the live state hashes to the truth again. This is a fake second
 /// player: the host snapshot is synthesized instead of received.
@@ -67,7 +68,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             var cards = pile.Cards.ToList();
             if (cards.Count < 2)
             {
-                throw new InvalidOperationException("need at least 2 cards in draw pile or hand");
+                throw new Unavailable("need at least 2 cards in draw pile or hand");
             }
             foreach (var c in cards) pile.RemoveInternal(c, silent: true);
             cards.Reverse();
@@ -87,7 +88,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
         {
             var potion = ModelDb.AllPotions.First().ToMutable();
             var res = p.AddPotionInternal(potion, -1, silent: true);
-            if (!res.success) throw new InvalidOperationException("no free potion slot");
+            if (!res.success) throw new Unavailable("no free potion slot");
         },
         ["relic"] = (_, p) =>
         {
@@ -103,7 +104,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             var orbs = queue.Orbs.ToList();
             if (orbs.Count < 2 || orbs.All(o => o.Id == orbs[0].Id))
             {
-                throw new InvalidOperationException("need two orbs of different types");
+                throw new Unavailable("need two orbs of different types");
             }
             queue.Remove(orbs[0]);
             queue.Insert(orbs.Count - 1, orbs[0]);
@@ -123,7 +124,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                     b.card.Id == a.card.Id && b.card.CurrentUpgradeLevel == a.card.CurrentUpgradeLevel &&
                     (b.pile != a.pile || b.index != a.index))
                 .Select(b => (a, b))).FirstOrDefault();
-            if (pair.a.card == null) throw new InvalidOperationException("need two identical cards in combat piles");
+            if (pair.a.card == null) throw new Unavailable("need two identical cards in combat piles");
             var (x, y) = pair;
             x.pile.RemoveInternal(x.card, silent: true);
             y.pile.RemoveInternal(y.card, silent: true);
@@ -140,6 +141,25 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             }
             x.pile.InvokeContentsChanged();
             if (y.pile != x.pile) y.pile.InvokeContentsChanged();
+        },
+        // A card vanishes from the draw pile (the hand if the draw pile is empty). The resync has to create it again in the
+        // combat scope and give it the host's ID, which the ID database still holds for the vanished instance.
+        ["losecard"] = (_, p) =>
+        {
+            var combat = p.PlayerCombatState!;
+            var pile = combat.DrawPile.Cards.Count > 0 ? combat.DrawPile : combat.Hand;
+            if (pile.Cards.Count == 0) throw new Unavailable("need a card in the draw pile or hand");
+            pile.RemoveInternal(pile.Cards[pile.Cards.Count / 2], silent: true);
+            pile.InvokeContentsChanged();
+        },
+        // The first power of a creature with at least two vanishes. Re-adding it appends, so the resync also has to put
+        // the powers back in the host's order, which the checksum hashes.
+        ["losepower"] = (_, p) =>
+        {
+            var creature = new[] { p.Creature }
+                .Concat(p.Creature.CombatState?.Creatures.Where(c => c.IsEnemy && c.IsAlive) ?? Enumerable.Empty<Creature>())
+                .FirstOrDefault(c => c.Powers.Count() >= 2) ?? throw new Unavailable("need a creature with at least two powers");
+            creature.Powers.First().RemoveInternal();
         },
     };
 
@@ -165,13 +185,21 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                     }
                     var (run, me) = RequireCombat(issuingPlayer);
                     perturb(run, me);
-                    return new CmdResult(success: true, $"Drifted local state ({args[1]}). The next checkpoint will diverge from the host.");
+                    return new CmdResult(success: true, args[1].Equals("swapids", StringComparison.OrdinalIgnoreCase)
+                        ? "Swapped two identical cards. The checksum cannot see this, so no checkpoint will diverge; the next play of either card is cancelled on the host, which is the failure this drift reproduces."
+                        : $"Drifted local state ({args[1]}). The next checkpoint will diverge from the host.");
                 }
                 case "selftest":
                 {
+                    // The self-test rewrites the live state and only puts back what a resync repairs. In co-op a
+                    // scenario that fails would leave real drift behind; there, drift one peer with hsr desync instead.
+                    if (RunManager.Instance.NetService?.Type is NetGameType.Host or NetGameType.Client)
+                    {
+                        return new CmdResult(success: false, "hsr selftest only runs in singleplayer; in co-op use hsr desync <kind>.");
+                    }
                     var (run, me) = RequireCombat(issuingPlayer);
                     var names = args.Length >= 2 ? new[] { args[1] } : Perturbations.Keys.ToArray();
-                    var report = SelfTest(run, me, names);
+                    var report = SelfTest(run, me, names, includeDelta: args.Length < 2);
                     MainFile.Logger.Info(report.text);
                     return new CmdResult(report.allPassed, report.text);
                 }
@@ -215,9 +243,9 @@ public class HsrConsoleCmd : AbstractConsoleCmd
 
     private static Creature FirstEnemy(Player p) =>
         p.Creature.CombatState?.Creatures.FirstOrDefault(c => c.IsEnemy && c.IsAlive)
-        ?? throw new InvalidOperationException("no living enemy");
+        ?? throw new Unavailable("no living enemy");
 
-    private static (bool allPassed, string text) SelfTest(RunState run, Player me, IEnumerable<string> names)
+    private static (bool allPassed, string text) SelfTest(RunState run, Player me, IEnumerable<string> names, bool includeDelta)
     {
         var tracker = RunManager.Instance.ChecksumTracker;
         var sb = new StringBuilder();
@@ -251,10 +279,14 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                 var afterIds = CardIdLayout.Capture(run);
                 bool sumOk = tracker.GenerateChecksum(after) == tracker.GenerateChecksum(truth);
                 bool idsOk = SameIds(run, truthIds, afterIds);
-                bool pass = sumOk && idsOk;
+                // A card outside the combat scope throws on its next draw, discard or play.
+                bool scopeOk = me.PlayerCombatState!.AllPiles.Where(x => x.IsCombatPile).SelectMany(x => x.Cards)
+                    .All(c => me.Creature.CombatState?.ContainsCard(c) == true);
+                bool pass = sumOk && idsOk && scopeOk;
                 all &= pass;
                 sb.AppendLine($"{name}: {(pass ? "PASS" : "FAIL")} ({result.FixedCount} fix(es)" +
-                              $"{(sumOk ? "" : ", checksum differs")}{(idsOk ? "" : ", card IDs differ")})");
+                              $"{(sumOk ? "" : ", checksum differs")}{(idsOk ? "" : ", card IDs differ")}" +
+                              $"{(scopeOk ? "" : ", a card is not in the combat scope")})");
                 if (!sumOk)
                 {
                     sb.AppendLine(Diff(truth.ToString(), after.ToString()));
@@ -269,11 +301,22 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                     MainFile.Logger.Warn(result.ToLogString());
                 }
             }
+            catch (Unavailable e)
+            {
+                // Thrown before the drift changes anything, so nothing is left behind.
+                sb.AppendLine($"{name}: SKIP ({e.Message})");
+            }
             catch (Exception e)
             {
                 all = false;
                 sb.AppendLine($"{name}: ERROR {e.GetType().Name}: {e.Message}");
             }
+        }
+
+        if (!includeDelta)
+        {
+            sb.Insert(0, $"hsr selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
+            return (all, sb.ToString().TrimEnd());
         }
 
         // Delta scenario: the peer drifts, a checkpoint is taken, then a lockstep action (gain 1 energy) runs on the
@@ -301,6 +344,14 @@ public class HsrConsoleCmd : AbstractConsoleCmd
 
         sb.Insert(0, $"hsr selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
         return (all, sb.ToString().TrimEnd());
+    }
+
+    /// <summary>A drift whose precondition is missing (an empty draw pile, no free potion slot); reported as SKIP.</summary>
+    private sealed class Unavailable : InvalidOperationException
+    {
+        public Unavailable(string message) : base(message)
+        {
+        }
     }
 
     private static bool SameIds(RunState run, CardIdLayout a, CardIdLayout b) =>
