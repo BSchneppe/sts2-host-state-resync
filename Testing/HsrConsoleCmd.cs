@@ -95,15 +95,18 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             var relic = ModelDb.AllRelics.First(r => !owned.Contains(r.Id)).ToMutable();
             p.AddRelicInternal(relic, -1, silent: true);
         },
+        // The first orb moves to the end. A resync only ever reorders orbs: creating or destroying one would lose its
+        // UI node and other mods' per-orb state, so a drift that adds or removes orbs could never be healed.
         ["orb"] = (_, p) =>
         {
             var queue = p.PlayerCombatState!.OrbQueue;
-            if (queue.Capacity == 0) queue.AddCapacity(1);
-            if (queue.Orbs.Count >= queue.Capacity) { queue.Remove(queue.Orbs.Last()); return; }
-            var frost = ModelDb.GetByIdOrNull<OrbModel>(new ModelId("ORB", "FROST_ORB")) ?? throw new InvalidOperationException("no FROST_ORB");
-            var orb = frost.ToMutable();
-            orb.Owner = p;
-            queue.Insert(queue.Orbs.Count, orb);
+            var orbs = queue.Orbs.ToList();
+            if (orbs.Count < 2 || orbs.All(o => o.Id == orbs[0].Id))
+            {
+                throw new InvalidOperationException("need two orbs of different types");
+            }
+            queue.Remove(orbs[0]);
+            queue.Insert(orbs.Count - 1, orbs[0]);
         },
         ["choice"] = (_, _) =>
         {

@@ -80,6 +80,13 @@ public static class HostStateApplier
         }
 
         Try(result, "creatures", () => ApplyCreatures(run, host, baseState, turnMoved, result));
+        foreach (var hostPlayer in host.Players)
+        {
+            if (run.GetPlayer(hostPlayer.playerId)?.PlayerCombatState is not { } combat) continue;
+            var hp = hostPlayer;
+            var basePlayer = FindPlayer(baseState, hostPlayer.playerId);
+            Try(result, $"player {hp.playerId} orbs", () => ApplyOrbs(combat, hp, basePlayer, $"player {hp.playerId}", result));
+        }
         // After the creatures: card values (RecalculateCardValues) follow the powers just written.
         Try(result, "card piles", () => CommitPiles(ids, run, result));
         return result;
@@ -276,8 +283,6 @@ public static class HostStateApplier
         {
             PlanPiles(player, combat, host, baseP, ids, who, result);
         }
-
-        ApplyOrbs(player, combat, host, baseP, who, result);
     }
 
     private static void ApplyPotions(Player player, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
@@ -372,11 +377,14 @@ public static class HostStateApplier
     // ------------------------------------------------------------------ orbs
 
     /// <summary>
-    /// Orb identity and order are rebuilt from the host (existing instances reused by id, missing ones created from
-    /// ModelDb). Passive/evoke values are derived from powers such as Focus, so they are not written; the only stateful
-    /// exception is Dark, whose accumulated evoke value lives in a private field that is set to the host value.
+    /// Orbs are only put back in the host's order, never created or destroyed. A created orb has no node in
+    /// NOrbManager, so evoking it throws (EvokeOrbAnim looks its node up by model) before the evoke takes effect, and it
+    /// loses whatever other mods keep per orb instance. Passive and evoke values are computed by hooks (Focus, relics,
+    /// other mods' per-orb bonuses), so they are not written either. The exception is state an orb accumulates in its
+    /// own private field (Dark's evoke value, Glass's passive value), which is moved by its difference to the host's.
+    /// Runs after the creatures, so a Focus difference is already repaired when the values are compared.
     /// </summary>
-    private static void ApplyOrbs(Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
+    private static void ApplyOrbs(PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
     {
         var queue = combat.OrbQueue;
         var localOrbs = queue.Orbs.Select(NetFullCombatState.OrbState.From).ToList();
@@ -389,56 +397,73 @@ public static class HostStateApplier
             result.Skip($"{who} orbs", "changed locally since checkpoint");
             return;
         }
-        if (host.orbs.Count > queue.Capacity)
+
+        // Our orbs in the host's order: an orb with the host's values first, then any orb of that type.
+        var pool = queue.Orbs.ToList();
+        var desired = new OrbModel?[host.orbs.Count];
+        foreach (var exact in new[] { true, false })
         {
-            result.Skip($"{who} orbs", $"host has {host.orbs.Count} orbs but our capacity is {queue.Capacity}");
+            for (int i = 0; i < host.orbs.Count; i++)
+            {
+                if (desired[i] != null) continue;
+                var h = host.orbs[i];
+                var match = pool.FirstOrDefault(o => o.Id == h.id && (!exact || BytesEqual(NetFullCombatState.OrbState.From(o), h)));
+                if (match != null)
+                {
+                    desired[i] = match;
+                    pool.Remove(match);
+                }
+            }
+        }
+        if (desired.Any(o => o == null) || pool.Count > 0)
+        {
+            result.Skip($"{who} orbs", "the orb set differs; creating or destroying orbs is not repaired " +
+                                        "(a created orb has no UI node and loses other mods' per-orb state)");
             return;
         }
 
-        var pool = queue.Orbs.ToList();
-        var desired = new List<OrbModel>();
-        int created = 0;
-        foreach (var hostOrb in host.orbs)
+        var changes = new List<string>();
+        var order = desired.Select(o => o!).ToList();
+        if (!order.SequenceEqual(queue.Orbs))
         {
-            int idx = pool.FindIndex(o => o.Id == hostOrb.id);
-            OrbModel orb;
-            if (idx >= 0)
+            foreach (var orb in queue.Orbs.ToList())
             {
-                orb = pool[idx];
-                pool.RemoveAt(idx);
+                queue.Remove(orb);
             }
-            else
+            for (int i = 0; i < order.Count; i++)
             {
-                var canonical = ModelDb.GetByIdOrNull<OrbModel>(hostOrb.id);
-                if (canonical == null)
-                {
-                    result.Skip($"{who} orb {hostOrb.id}", "unknown orb id");
-                    continue;
-                }
-                orb = canonical.ToMutable();
-                orb.Owner = player;
-                created++;
+                queue.Insert(i, order[i]);
             }
-            if ((int)orb.EvokeVal != hostOrb.evoke)
-            {
-                var evokeField = AccessTools.Field(orb.GetType(), "_evokeVal");
-                if (evokeField != null && evokeField.FieldType == typeof(decimal))
-                {
-                    evokeField.SetValue(orb, (decimal)hostOrb.evoke);
-                }
-            }
-            desired.Add(orb);
+            changes.Add("reordered");
         }
+        for (int i = 0; i < order.Count; i++)
+        {
+            var orb = order[i];
+            if (Nudge(orb, "_evokeVal", host.orbs[i].evoke - (int)orb.EvokeVal)) changes.Add($"{orb.Id} evoke");
+            if (Nudge(orb, "_passiveVal", host.orbs[i].passive - (int)orb.PassiveVal)) changes.Add($"{orb.Id} passive");
+        }
+        if (changes.Count > 0)
+        {
+            result.Fix($"{who} orbs", string.Join(", ", changes));
+        }
+        if (!ListBytesEqual(queue.Orbs.Select(NetFullCombatState.OrbState.From).ToList(), host.orbs))
+        {
+            result.Skip($"{who} orbs", "passive/evoke values still differ; they come from Focus, relics and other mods' " +
+                                       "per-orb state, which a resync cannot write");
+        }
+    }
 
-        foreach (var orb in queue.Orbs.ToList())
-        {
-            queue.Remove(orb);
-        }
-        for (int i = 0; i < desired.Count; i++)
-        {
-            queue.Insert(i, desired[i]);
-        }
-        result.Fix($"{who} orbs", $"rebuilt from host ({created} created, {pool.Count} removed)");
+    /// <summary>
+    /// Moves a decimal field the orb type itself declares by <paramref name="delta"/>. Hook modifiers on top of it are
+    /// additive, so shifting the field shifts the computed value by the same amount.
+    /// </summary>
+    private static bool Nudge(OrbModel orb, string field, int delta)
+    {
+        if (delta == 0) return false;
+        var info = orb.GetType().GetField(field, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        if (info == null || info.FieldType != typeof(decimal)) return false;
+        info.SetValue(orb, (decimal)info.GetValue(orb)! + delta);
+        return true;
     }
 
     // ----------------------------------------------------------------- piles
