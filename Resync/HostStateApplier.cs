@@ -1084,6 +1084,11 @@ public static class HostStateApplier
                     result.Skip($"{who} power {hp.id}", "unknown power id");
                     continue;
                 }
+                if (hp.amount == 0)
+                {
+                    result.Skip($"{who} power {hp.id}", "the host has it at amount 0, which ApplyInternal does not add");
+                    continue;
+                }
                 canonical.ToMutable().ApplyInternal(creature, hp.amount, silent: true);
                 changes.Add($"+{hp.id} {hp.amount}");
             }
