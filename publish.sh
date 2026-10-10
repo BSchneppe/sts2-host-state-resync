@@ -21,7 +21,7 @@ set -euo pipefail
 
 # ── Config ─────────────────────────────────────────────────────────────
 APP_ID="2868840"
-PUBLISHED_FILE_ID=""         # leave empty; auto-created & saved on first run
+PUBLISHED_FILE_ID="3816934494"         # leave empty; auto-created & saved on first run
 STEAM_USER="${STEAM_USER:-}"               # TODO: Steam builder account (required)
 # 0=public 1=friends 2=private 3=unlisted. Applied only when creating a new item; an update
 # leaves the item's current visibility alone unless VISIBILITY is set explicitly. Emitting it
@@ -29,6 +29,7 @@ STEAM_USER="${STEAM_USER:-}"               # TODO: Steam builder account (requir
 VISIBILITY="${VISIBILITY:-}"
 DOTNET="${DOTNET:-}"                       # auto-detected below; export DOTNET=... to override
 PREVIEW="${PREVIEW:-workshop_preview.png}" # optional; used only if the file exists
+DESCRIPTION="${DESCRIPTION:-workshop/description.bbcode}" # BBCode; used only when creating the item
 # ───────────────────────────────────────────────────────────────────────
 
 cd "$(dirname "$0")"
@@ -117,6 +118,15 @@ VDF="$REPO/build/workshop_item.vdf"
     echo "    \"visibility\"      \"$VISIBILITY\""
   fi
   echo "    \"title\"           \"Slay the Divergence (Co-op Desync Fix)\""
+  # The description is set when the item is created, or with SET_DESCRIPTION=1; otherwise later uploads keep whatever
+  # was edited on the item page. steamcmd's manifest parser has no escapes: a backslash stays literal and the first
+  # double quote ends the string, so the description must not contain one (use typographic quotes).
+  if { $CREATING || [[ -n "${SET_DESCRIPTION:-}" ]]; } && [[ -f "$REPO/$DESCRIPTION" ]]; then
+    if grep -q '"' "$REPO/$DESCRIPTION"; then
+      err "$DESCRIPTION contains a double quote, which would cut the description off; use “ ” instead."
+    fi
+    printf '    "description"     "%s"\n' "$(cat "$REPO/$DESCRIPTION")"
+  fi
   echo "    \"changenote\"      \"$CHANGENOTE\""
   if [[ -f "$REPO/$PREVIEW" ]]; then
     echo "    \"previewfile\"     \"$REPO/$PREVIEW\""
@@ -141,7 +151,7 @@ set -e
 
 # ── 5. On first publish, capture & save the new item ID ────────────────
 if $CREATING; then
-  NEW_ID="$(grep -oiE 'PublishedFileID[^0-9]*[0-9]+' "$LOG" | grep -oE '[0-9]+' | tail -1)"
+  NEW_ID="$(grep -oiE 'Publish(ed)?FileID[^0-9]*[0-9]+' "$LOG" | grep -oE '[0-9]+' | tail -1)"
   if [[ -n "$NEW_ID" ]]; then
     echo "$NEW_ID" > "$ID_FILE"
     echo ">> Created Workshop item $NEW_ID (saved to $ID_FILE)."
