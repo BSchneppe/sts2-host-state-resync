@@ -16,7 +16,10 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Nodes.Cards;
+using MegaCrit.Sts2.Core.Entities.Orbs;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Orbs;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
@@ -90,13 +93,19 @@ public static class HostStateApplier
         Try(result, "creatures", () => ApplyCreatures(run, host, baseState, turnMoved, result));
         foreach (var hostPlayer in host.Players)
         {
-            if (run.GetPlayer(hostPlayer.playerId)?.PlayerCombatState is not { } combat) continue;
+            if (run.GetPlayer(hostPlayer.playerId) is not { PlayerCombatState: { } combat } orbOwner) continue;
             var hp = hostPlayer;
             var basePlayer = FindPlayer(baseState, hostPlayer.playerId);
-            Try(result, $"player {hp.playerId} orbs", () => ApplyOrbs(combat, hp, basePlayer, $"player {hp.playerId}", result));
+            Try(result, $"player {hp.playerId} orbs", () => ApplyOrbs(orbOwner, combat, hp, basePlayer, $"player {hp.playerId}", result));
         }
         // After the creatures: card values (RecalculateCardValues) follow the powers just written.
         Try(result, "card piles", () => CommitPiles(ids, run, result));
+        // Last: ending the combat runs most of its teardown synchronously (powers, block and piles cleared), which must
+        // not happen under the repair's feet.
+        if (result.NeedsWinCheck)
+        {
+            TaskHelper.RunSafely(CombatManager.Instance.CheckWinCondition());
+        }
         return result;
     }
 
@@ -475,18 +484,21 @@ public static class HostStateApplier
     // ------------------------------------------------------------------ orbs
 
     /// <summary>
-    /// Orbs are only put back in the host's order, never created or destroyed. A created orb has no node in
-    /// NOrbManager, so evoking it throws (EvokeOrbAnim looks its node up by model) before the evoke takes effect, and it
-    /// loses whatever other mods keep per orb instance. Passive and evoke values are computed by hooks (Focus, relics,
-    /// other mods' per-orb bonuses), so they are not written either, with one exception: Dark's evoke value is a plain
-    /// field the orb accumulates itself, with no hook on top, so it is moved by its divergence at the checkpoint
-    /// (host minus base), which keeps what it accumulated since.
+    /// Puts the host's orbs in the host's order. Orbs of the same type are reused, so whatever other mods keep per orb
+    /// instance survives; an orb only the host has is created from its id, and one only we have is removed without
+    /// its evoke (the host already applied that). The orb display is then brought in line slot by slot through
+    /// <c>NOrb.ReplaceOrb</c>, so a created orb has a node to evoke from later. Passive and evoke values are computed by
+    /// hooks (Focus, relics, other mods' per-orb bonuses), so they are not written, with two exceptions: Dark's evoke
+    /// value and Glass's passive value are plain fields the orb keeps itself (Dark accumulates, Glass decays). They are
+    /// moved by their divergence at the checkpoint (host minus base), which keeps what changed since, or set to the
+    /// host's value on an orb created just now.
     /// </summary>
     /// <remarks>
     /// "Changed locally since the checkpoint" compares which orbs there are and their order, not their values: the
-    /// values are recomputed from Focus and the like, which the creature repair may just have changed.
+    /// values are recomputed from Focus and the like, which the creature repair may just have changed. A created orb
+    /// starts without other mods' per-orb state; if that makes its values differ, they are reported as a skip.
     /// </remarks>
-    private static void ApplyOrbs(PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
+    private static void ApplyOrbs(Player player, PlayerCombatState combat, NetFullCombatState.PlayerState host, NetFullCombatState.PlayerState? baseP, string who, ResyncResult result)
     {
         var queue = combat.OrbQueue;
         var localOrbs = queue.Orbs.Select(NetFullCombatState.OrbState.From).ToList();
@@ -526,14 +538,28 @@ public static class HostStateApplier
                 }
             }
         }
-        if (desired.Any(o => o == null) || pool.Count > 0)
+        if (host.orbs.Count > queue.Capacity)
         {
-            result.Skip($"{who} orbs", "the orb set differs; creating or destroying orbs is not repaired " +
-                                        "(a created orb has no UI node and loses other mods' per-orb state)");
+            result.Skip($"{who} orbs", $"the host has {host.orbs.Count} orbs, we have {queue.Capacity} slots");
             return;
         }
 
         var changes = new List<string>();
+        for (int i = 0; i < desired.Length; i++)
+        {
+            if (desired[i] != null) continue;
+            var orb = ModelDb.GetById<OrbModel>(host.orbs[i].id).ToMutable();
+            orb.Owner = player;
+            desired[i] = orb;
+            changes.Add($"+{orb.Id}");
+        }
+        foreach (var extra in pool)
+        {
+            queue.Remove(extra);
+            extra.RemoveInternal();
+            changes.Add($"-{extra.Id}");
+        }
+
         var order = desired.Select(o => o!).ToList();
         if (!order.SequenceEqual(queue.Orbs))
         {
@@ -545,15 +571,29 @@ public static class HostStateApplier
             {
                 queue.Insert(i, order[i]);
             }
-            changes.Add("reordered");
+            if (changes.Count == 0) changes.Add("reordered");
+        }
+        if (changes.Count > 0)
+        {
+            Try(result, $"{who} orb display", () => SyncOrbView(player, queue));
         }
         for (int i = 0; i < order.Count; i++)
         {
+            // The two orbs that keep their own number: Dark accumulates its evoke value, Glass loses passive value each
+            // turn. Both are moved by their drift at the checkpoint, or to the host's value for an orb created just now.
             var orb = order[i];
-            int drift = baseOf.TryGetValue(orb, out var b) ? host.orbs[i].evoke - b.evoke : host.orbs[i].evoke - (int)orb.EvokeVal;
-            if (orb is DarkOrb && drift != 0 && Nudge(orb, "_evokeVal", drift))
+            bool known = baseOf.TryGetValue(orb, out var b);
+            if (orb is DarkOrb)
             {
-                changes.Add($"{orb.Id} evoke {drift:+0;-0}");
+                int drift = known ? host.orbs[i].evoke - b.evoke : host.orbs[i].evoke - (int)orb.EvokeVal;
+                if (drift != 0 && Nudge(orb, "_evokeVal", drift)) changes.Add($"{orb.Id} evoke {drift:+0;-0}");
+            }
+            else if (orb is GlassOrb)
+            {
+                // PassiveVal is _passiveVal plus Focus, clamped at 0 (FocusPower: Math.Max), so the computed drift equals
+                // the raw drift until both sides clamp; clamped values hash equal, and the drift is moved once it shows.
+                int drift = known ? host.orbs[i].passive - b.passive : host.orbs[i].passive - (int)orb.PassiveVal;
+                if (drift != 0 && Nudge(orb, "_passiveVal", drift)) changes.Add($"{orb.Id} passive {drift:+0;-0}");
             }
         }
         if (changes.Count > 0)
@@ -565,6 +605,44 @@ public static class HostStateApplier
             result.Skip($"{who} orbs", "passive/evoke values still differ; they come from Focus, relics and other mods' " +
                                        "per-orb state, which a resync cannot write");
         }
+    }
+
+    private static readonly FieldInfo? OrbNodesField = AccessTools.Field(typeof(NOrbManager), "_orbs");
+
+    /// <summary>
+    /// Shows the queue's orbs in the queue's order: one slot node per orb slot, filled front to back, each pointed at its
+    /// orb with <c>NOrb.ReplaceOrb</c> (the game's own swap), empty slots last. Without this a created orb has no node,
+    /// and the next evoke throws looking it up.
+    /// </summary>
+    public static void SyncOrbView(Player player, OrbQueue queue)
+    {
+        var manager = NCombatRoom.Instance?.GetCreatureNode(player.Creature)?.OrbManager;
+        if (manager == null || OrbNodesField?.GetValue(manager) is not List<NOrb> nodes)
+        {
+            return;
+        }
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            var want = i < queue.Orbs.Count ? queue.Orbs[i] : null;
+            if (nodes[i].Model != want)
+            {
+                // ReplaceOrb takes null for an empty slot: it sets Model and redraws, and UpdateVisuals draws null as empty.
+                nodes[i].ReplaceOrb(want!);
+            }
+        }
+    }
+
+    /// <summary>Whether every slot node shows the queue's orb at that slot (and the rest are empty). True without a display.</summary>
+    public static bool OrbViewMatches(Player player)
+    {
+        var queue = player.PlayerCombatState?.OrbQueue;
+        var manager = NCombatRoom.Instance?.GetCreatureNode(player.Creature)?.OrbManager;
+        if (queue == null || manager == null || OrbNodesField?.GetValue(manager) is not List<NOrb> nodes)
+        {
+            return true;
+        }
+        return nodes.Count >= queue.Orbs.Count &&
+               nodes.Select((node, i) => node.Model == (i < queue.Orbs.Count ? queue.Orbs[i] : null)).All(ok => ok);
     }
 
     /// <summary>Moves a decimal field the orb type itself declares by <paramref name="delta"/>.</summary>
@@ -972,24 +1050,117 @@ public static class HostStateApplier
             }
             return;
         }
-        if (local.Count != host.Creatures.Count)
+        // Removing a creature changes the live list, so work on a copy.
+        var creatures = local.ToList();
+        var localKeys = creatures.Select(c => new CreatureMatch.Key(c.Monster?.Id, c.Player?.NetId, c.CurrentHp)).ToList();
+        var toHost = CreatureMatch.Align(Keys(host), localKeys);
+        if (toHost == null)
         {
-            result.Skip("creatures", $"count differs ({local.Count} local vs {host.Creatures.Count} host); creature set is not overridable");
+            result.Skip("creatures", $"the host has creatures we don't ({creatures.Count} local vs {host.Creatures.Count} host); " +
+                                     "creating creatures is not repaired");
             return;
         }
+        var toBase = baseState != null ? CreatureMatch.Align(Keys(baseState), localKeys, partial: true) : null;
 
-        for (int i = 0; i < local.Count; i++)
+        var extras = Enumerable.Range(0, creatures.Count).Where(i => toHost[i] < 0).ToList();
+        if (extras.Count > 0 && combatState != null)
         {
-            var creature = local[i];
-            var h = host.Creatures[i];
-            if (creature.Monster?.Id != h.monsterId || creature.Player?.NetId != h.playerId)
+            RemoveGoneCreatures(combatState, extras.Select(i => creatures[i]).ToList(), host, baseState, result);
+        }
+
+        for (int i = 0; i < creatures.Count; i++)
+        {
+            if (toHost[i] < 0) continue;
+            NetFullCombatState.CreatureState? b = toBase != null && toBase[i] >= 0 ? baseState!.Creatures[toBase[i]] : null;
+            ApplyCreature(creatures[i], host.Creatures[toHost[i]], b, turnMoved, result);
+        }
+    }
+
+    private static List<CreatureMatch.Key> Keys(NetFullCombatState state) =>
+        state.Creatures.Select(c => new CreatureMatch.Key(c.monsterId, c.playerId, c.currentHp)).ToList();
+
+    /// <summary>
+    /// Removes enemies the host no longer has, the way a death removes them, but without the death's hooks: those ran
+    /// on the host, and their results (powers, HP, relic counters) arrive with the rest of its state. Gated like every
+    /// other repair: only an enemy we already had more of than the host at the checkpoint goes, never one that spawned
+    /// here since, and never an ally or a pet.
+    /// </summary>
+    private static void RemoveGoneCreatures(ICombatState combatState, List<Creature> extras, NetFullCombatState host,
+        NetFullCombatState? baseState, ResyncResult result)
+    {
+        if (baseState == null)
+        {
+            result.Skip("creatures", $"{extras.Count} creature(s) the host doesn't have, but no checkpoint snapshot to tell why");
+            return;
+        }
+        // A monster takes its turn after waits during which it is not yet marked as moving; removing it then would let its
+        // move run anyway. The divergence repeats at the next checkpoint, so the removal just waits for our own turn.
+        if (combatState.CurrentSide == CombatSide.Enemy)
+        {
+            result.Skip("creatures", $"{extras.Count} creature(s) the host doesn't have; left for the next checkpoint, it is the enemies' turn");
+            return;
+        }
+        // How many of each monster the host had removed by the checkpoint and we had not.
+        var budget = baseState.Creatures.Where(c => c.monsterId != null).GroupBy(c => c.monsterId!)
+            .ToDictionary(g => g.Key, g => g.Count() - host.Creatures.Count(h => h.monsterId == g.Key));
+
+        bool removedAny = false;
+        foreach (var creature in extras)
+        {
+            string who = $"creature {creature.LogName}";
+            var id = creature.Monster?.Id;
+            if (!creature.IsMonster || !creature.IsEnemy || id == null)
             {
-                result.Skip($"creature[{i}]", $"identity differs ({creature.LogName} vs {h.monsterId?.ToString() ?? h.playerId?.ToString()})");
+                result.Skip(who, "the host doesn't have it, but only enemies are removed");
                 continue;
             }
-            NetFullCombatState.CreatureState? b = baseState != null && baseState.Creatures.Count == local.Count ? baseState.Creatures[i] : null;
-            ApplyCreature(creature, h, b, turnMoved, result);
+            if (!budget.TryGetValue(id, out int left) || left <= 0)
+            {
+                result.Skip(who, "the host doesn't have it, but it appeared here after the checkpoint");
+                continue;
+            }
+            if (creature.Monster!.IsPerformingMove)
+            {
+                result.Skip(who, "the host doesn't have it, but it is in the middle of its move");
+                continue;
+            }
+            budget[id] = left - 1;
+            try
+            {
+                RemoveCreature(combatState, creature);
+                removedAny = true;
+                result.Fix($"{who} removed", "already gone in the host's game");
+            }
+            catch (Exception e)
+            {
+                result.Fail($"{who} removal", e);
+            }
         }
+
+        // The last enemy gone ends the combat on the host; without this check the client would wait in an empty room.
+        // Apply runs it once everything else is written.
+        if (removedAny && !combatState.Enemies.Any(e => e.IsAlive))
+        {
+            result.NeedsWinCheck = true;
+        }
+    }
+
+    /// <summary>The removal half of <c>CreatureCmd.KillWithoutCheckingWinCondition</c>, with the hooks left out.</summary>
+    public static void RemoveCreature(ICombatState combatState, Creature creature)
+    {
+        if (creature.IsAlive && SetCurrentHp != null)
+        {
+            SetCurrentHp(creature, 0);
+        }
+        creature.RemoveAllPowersInternalExcept();
+        var node = NCombatRoom.Instance?.GetCreatureNode(creature);
+        if (node != null)
+        {
+            node.StartDeathAnim(shouldRemove: true);
+            NCombatRoom.Instance!.RemoveCreatureNode(node);
+        }
+        CombatManager.Instance.RemoveCreature(creature);
+        combatState.RemoveCreature(creature);
     }
 
     private static void ApplyCreature(Creature creature, NetFullCombatState.CreatureState host, NetFullCombatState.CreatureState? b, bool turnMoved, ResyncResult result)
@@ -1254,6 +1425,9 @@ public sealed class ResyncResult
     public uint ChecksumId { get; }
     public bool HadBaseline { get; }
     public int FixedCount => _fixed.Count;
+
+    /// <summary>An enemy removal left no living enemy, so the combat may be over; <see cref="HostStateApplier.Apply"/> checks last.</summary>
+    public bool NeedsWinCheck { get; set; }
 
     public void Fix(string what, string detail) => _fixed.Add($"{what}: {detail}");
     public void Skip(string what, string why) => _skipped.Add($"{what}: {why}");

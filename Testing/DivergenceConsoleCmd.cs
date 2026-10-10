@@ -28,8 +28,8 @@ namespace SlayTheDivergence.Testing;
 /// player: the host snapshot is synthesized instead of received.
 ///
 /// <c>divergence desync &lt;kind&gt;</c>: perturb the live state on THIS peer only (the command is not networked). Run it on
-/// the client of a real two-instance session (see tools/localmp.sh); the next checkpoint diverges and the mod has to
-/// heal it for real.
+/// the client of a real two-instance session (see tools/localmp.sh), except <c>removeenemy</c>, which runs on the host;
+/// the next checkpoint diverges and the mod has to heal it for real.
 ///
 /// <c>divergence status</c>: host strike counters and the last resync result.
 /// </summary>
@@ -96,8 +96,7 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
             var relic = ModelDb.AllRelics.First(r => !owned.Contains(r.Id)).ToMutable();
             p.AddRelicInternal(relic, -1, silent: true);
         },
-        // The first orb moves to the end. A resync only ever reorders orbs: creating or destroying one would lose its
-        // UI node and other mods' per-orb state, so a drift that adds or removes orbs could never be healed.
+        // The first orb moves to the end, display included. The resync has to put the same orbs back in order.
         ["orb"] = (_, p) =>
         {
             var queue = p.PlayerCombatState!.OrbQueue;
@@ -108,6 +107,7 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
             }
             queue.Remove(orbs[0]);
             queue.Insert(orbs.Count - 1, orbs[0]);
+            HostStateApplier.SyncOrbView(p, queue);
         },
         ["choice"] = (_, _) =>
         {
@@ -161,7 +161,71 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                 .FirstOrDefault(c => c.Powers.Count() >= 2) ?? throw new Unavailable("need a creature with at least two powers");
             creature.Powers.First().RemoveInternal();
         },
+        // The middle orb vanishes without being evoked. On a client the host still has it, so the resync has to create it
+        // (with a node, or the next evoke throws); run on the host, the client has to remove it.
+        ["loseorb"] = (_, p) =>
+        {
+            var queue = p.PlayerCombatState!.OrbQueue;
+            if (queue.Orbs.Count < 2) throw new Unavailable("need at least two orbs");
+            var orb = queue.Orbs[queue.Orbs.Count / 2];
+            queue.Remove(orb);
+            orb.RemoveInternal();
+            HostStateApplier.SyncOrbView(p, queue);
+        },
+        // Run on the HOST: an enemy vanishes there without dying, so the client still has a monster the host does not,
+        // which is what a monster killed on one peer only looks like. Needs two living enemies, so the drifting peer's
+        // combat does not end with it. On a client it would leave the host with a creature the client cannot recreate.
+        ["removeenemy"] = (_, p) =>
+        {
+            if (RunManager.Instance.NetService?.Type != NetGameType.Host) throw new Unavailable("run it on the host of a co-op session");
+            var combat = p.Creature.CombatState ?? throw new Unavailable("need a combat");
+            var alive = combat.Enemies.Where(c => c.IsAlive).ToList();
+            if (alive.Count < 2) throw new Unavailable("need at least two living enemies");
+            HostStateApplier.RemoveCreature(combat, alive[^1]);
+        },
     };
+
+    /// <summary>Drifts the self-test cannot heal by design: its synthetic host is the state BEFORE the drift.</summary>
+    private static readonly HashSet<string> DesyncOnly = new(StringComparer.OrdinalIgnoreCase) { "removeenemy" };
+
+    /// <summary>
+    /// Self-test scenarios that change the synthetic HOST snapshot instead of the live state: the host has lost
+    /// something we still have. Each returns the snapshot to repair towards.
+    /// </summary>
+    private static readonly Dictionary<string, Func<NetFullCombatState, Player, NetFullCombatState>> HostDrifts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // The last living enemy died on the host only. Needs two, so the fight goes on.
+        ["dropenemy"] = (truth, p) =>
+        {
+            var alive = LivingEnemySlots(truth, p);
+            if (alive.Count < 2) throw new Unavailable("need at least two living enemies");
+            truth.Creatures.RemoveAt(alive[^1]);
+            return truth;
+        },
+        // Every enemy died on the host only: the repair removes them all and the combat ends. Ends the fight, so it
+        // only runs when named.
+        ["dropallenemies"] = (truth, p) =>
+        {
+            var alive = LivingEnemySlots(truth, p);
+            if (alive.Count == 0) throw new Unavailable("need a living enemy");
+            foreach (int i in alive.OrderByDescending(i => i)) truth.Creatures.RemoveAt(i);
+            return truth;
+        },
+    };
+
+    /// <summary>Self-test scenarios left out of a full run because they end the fight.</summary>
+    private static readonly HashSet<string> NamedOnly = new(StringComparer.OrdinalIgnoreCase) { "dropallenemies" };
+
+    private static List<int> LivingEnemySlots(NetFullCombatState truth, Player p)
+    {
+        var live = p.Creature.CombatState?.Creatures ?? throw new Unavailable("need a combat");
+        return Enumerable.Range(0, Math.Min(live.Count, truth.Creatures.Count))
+            .Where(i => live[i].IsEnemy && live[i].IsAlive && truth.Creatures[i].monsterId == live[i].Monster?.Id)
+            .ToList();
+    }
+
+    private static IEnumerable<string> SelfTestKinds =>
+        Perturbations.Keys.Where(k => !DesyncOnly.Contains(k)).Concat(HostDrifts.Keys);
 
     public override CmdResult Process(Player? issuingPlayer, string[] args)
     {
@@ -174,7 +238,8 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
             switch (args[0].ToLowerInvariant())
             {
                 case "list":
-                    return new CmdResult(success: true, "Kinds: " + string.Join(", ", Perturbations.Keys));
+                    return new CmdResult(success: true, "Drift kinds (desync): " + string.Join(", ", Perturbations.Keys) +
+                                                        "\nSelf-test scenarios: " + string.Join(", ", SelfTestKinds));
                 case "status":
                     return new CmdResult(success: true, Status());
                 case "desync":
@@ -197,8 +262,12 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                     {
                         return new CmdResult(success: false, "divergence selftest only runs in singleplayer; in co-op use divergence desync <kind>.");
                     }
+                    if (args.Length >= 2 && DesyncOnly.Contains(args[1]))
+                    {
+                        return new CmdResult(success: false, $"{args[1]} only works as divergence desync {args[1]} on the host of a co-op session; the self-test cannot create creatures.");
+                    }
                     var (run, me) = RequireCombat(issuingPlayer);
-                    var names = args.Length >= 2 ? new[] { args[1] } : Perturbations.Keys.ToArray();
+                    var names = args.Length >= 2 ? new[] { args[1] } : SelfTestKinds.Where(k => !NamedOnly.Contains(k)).ToArray();
                     var report = SelfTest(run, me, names, includeDelta: args.Length < 2);
                     MainFile.Logger.Info(report.text);
                     return new CmdResult(report.allPassed, report.text);
@@ -222,10 +291,13 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
         {
             return CompleteArgument(Subcommands, Array.Empty<string>(), args.FirstOrDefault() ?? "", CompletionType.Subcommand);
         }
-        if (args.Length == 2 && (args[0].Equals("desync", StringComparison.OrdinalIgnoreCase) ||
-                                 args[0].Equals("selftest", StringComparison.OrdinalIgnoreCase)))
+        if (args.Length == 2 && args[0].Equals("desync", StringComparison.OrdinalIgnoreCase))
         {
             return CompleteArgument(Perturbations.Keys.OrderBy(k => k), new[] { args[0] }, args[1]);
+        }
+        if (args.Length == 2 && args[0].Equals("selftest", StringComparison.OrdinalIgnoreCase))
+        {
+            return CompleteArgument(SelfTestKinds.OrderBy(k => k), new[] { args[0] }, args[1]);
         }
         return new CompletionResult { Type = CompletionType.Argument, ArgumentContext = CmdName };
     }
@@ -254,7 +326,9 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
 
         foreach (var name in names)
         {
-            if (!Perturbations.TryGetValue(name, out var perturb))
+            bool hostSide = HostDrifts.TryGetValue(name, out var hostDrift);
+            Action<RunState, Player>? perturb = null;
+            if (!hostSide && !Perturbations.TryGetValue(name, out perturb))
             {
                 sb.AppendLine($"{name}: unknown scenario");
                 all = false;
@@ -264,7 +338,14 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
             {
                 var truth = NetFullCombatState.FromRun(run, null);
                 var truthIds = CardIdLayout.Capture(run);
-                perturb(run, me);
+                if (hostSide)
+                {
+                    truth = hostDrift!(truth, me);
+                }
+                else
+                {
+                    perturb!(run, me);
+                }
                 var drifted = NetFullCombatState.FromRun(run, null);
                 var driftedIds = CardIdLayout.Capture(run);
                 if (tracker.GenerateChecksum(truth) == tracker.GenerateChecksum(drifted) && SameIds(run, truthIds, driftedIds))
@@ -272,9 +353,18 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                     sb.AppendLine($"{name}: SKIP (perturbation changed neither the checksum nor the card IDs)");
                     continue;
                 }
-
                 var result = HostStateApplier.Apply(run, truth, drifted, fakeId++, truthIds, driftedIds);
                 LastResult = result;
+                if (name.Equals("dropallenemies", StringComparison.OrdinalIgnoreCase))
+                {
+                    // The repair ends the fight, so the state no longer compares with the snapshot; what counts is that
+                    // no enemy is left and the combat is ending.
+                    bool ended = me.Creature.CombatState?.Enemies.Any(e => e.IsAlive) != true &&
+                                 (CombatManager.Instance.IsOverOrEnding || !CombatManager.Instance.IsInProgress);
+                    all &= ended;
+                    sb.AppendLine($"{name}: {(ended ? "PASS" : "FAIL")} ({result.FixedCount} fix(es){(ended ? ", combat ending" : ", combat did not end")})");
+                    continue;
+                }
                 var after = NetFullCombatState.FromRun(run, null);
                 var afterIds = CardIdLayout.Capture(run);
                 bool sumOk = tracker.GenerateChecksum(after) == tracker.GenerateChecksum(truth);
@@ -282,11 +372,14 @@ public class DivergenceConsoleCmd : AbstractConsoleCmd
                 // A card outside the combat scope throws on its next draw, discard or play.
                 bool scopeOk = me.PlayerCombatState!.AllPiles.Where(x => x.IsCombatPile).SelectMany(x => x.Cards)
                     .All(c => me.Creature.CombatState?.ContainsCard(c) == true);
-                bool pass = sumOk && idsOk && scopeOk;
+                // An orb without its node throws on its next evoke.
+                bool orbViewOk = HostStateApplier.OrbViewMatches(me);
+                bool pass = sumOk && idsOk && scopeOk && orbViewOk;
                 all &= pass;
                 sb.AppendLine($"{name}: {(pass ? "PASS" : "FAIL")} ({result.FixedCount} fix(es)" +
                               $"{(sumOk ? "" : ", checksum differs")}{(idsOk ? "" : ", card IDs differ")}" +
-                              $"{(scopeOk ? "" : ", a card is not in the combat scope")})");
+                              $"{(scopeOk ? "" : ", a card is not in the combat scope")}" +
+                              $"{(orbViewOk ? "" : ", the orb display does not match the orbs")}");
                 if (!sumOk)
                 {
                     sb.AppendLine(Diff(truth.ToString(), after.ToString()));

@@ -24,9 +24,9 @@ Built against game `v0.111.0` (`41cef1ea`).
     healed. The orb drift destroyed an orb that carried another mod's per-orb bonus, which could
     never be recreated, and the client was kicked after 7 strikes.
 - v0.3.0 reworks the repair after a code review: stale divergence messages are ignored, counters
-  are not merged across turn-start resets, card IDs are validated before any pile is rebuilt, orbs
-  are only reordered, collections keep the host's order, and the hand view is synced. It builds and
-  its self-test scenarios were updated, but it has **not been run in game yet**.
+  are not merged across turn-start resets, card IDs are validated before any pile is rebuilt,
+  collections keep the host's order, and the hand view is synced. It builds and its self-test
+  scenarios were updated, but it has **not been run in game yet**.
 
 ## How vanilla detects and handles a desync
 
@@ -109,9 +109,9 @@ and fields. The actions that would normally cause a change (card plays, power an
 do not run, so their hooks and VFX do not fire; a few setters still raise their own change events
 (energy, stars, power amounts). Most UI is not told. The hand view is synced explicitly: cards that
 left the hand lose their node, cards that came in get one at their place in the pile; cards already
-shown keep their order. The orb display is not synced, so its order and the front-orb highlight can
-be off until the orbs next change, and potion, relic and power displays may show their old order.
-Both sides get a short on-screen text and a full per-field log line tagged `[SlayTheDivergence]`.
+shown keep their order. The orb display is synced slot by slot. Potion, relic and power displays
+may show their old order until they next change. Both sides get a short on-screen text and a full
+per-field log line tagged `[SlayTheDivergence]`.
 
 ### Card IDs
 
@@ -153,11 +153,12 @@ repairable.
 | card piles (order and contents) | yes, gated | matched as described under "Card IDs"; created cards go into the combat scope |
 | combat card IDs (`NetCombatCardDb`) | yes | the host's layout, validated before any pile changes |
 | next choice ids, next reward ids | yes | `FastForwardChoiceIds` / `FastForwardRewardIds` |
-| orb order | yes, gated | `OrbQueue.Remove/Insert` of the existing orbs |
-| orb values | partly | only Dark's evoke value, a plain field it accumulates itself; the rest comes from Focus, relics and other mods' hooks |
-| orb set (an orb missing or extra) | no | a created orb has no UI node (evoking it throws) and loses other mods' per-orb state |
+| orb order | yes, gated | `OrbQueue.Remove/Insert` of the existing orbs; the display follows through `NOrb.ReplaceOrb` |
+| orb values | partly | only Dark's evoke value and Glass's passive value, plain fields the orbs keep themselves; the rest comes from Focus, relics and other mods' hooks |
+| orb set (an orb missing or extra) | yes, gated | orbs of the same type are reused (they keep other mods' per-orb state); a missing one is created from its id, an extra one removed without its evoke; every slot node is then pointed at its orb, so a created orb can be evoked. A created orb starts without other mods' per-orb state, and a value that differs because of it is reported as a skip |
 | card affliction / modified energy cost / keywords / enchantment | no | not writable; a mismatch left after the rebuild is reported as a skip |
-| creature set (different count or identity) | no | a monster that died or spawned on one side only |
+| creature set: an enemy only we still have | yes, gated | removed the way a death removes it (node, powers, combat lists), without the death hooks, whose results arrive with the host's state; only when we already had more of that monster at N, never allies or pets; the last enemy going triggers the win check |
+| creature set: a creature only the host has | no | a monster or summon that spawned on the host only; creating creatures is not repaired |
 | turn number / turn phase | no | flow control; the peers would need to be in the same async action anyway |
 | last executed action id / hook id | n/a | informational |
 | anything outside `NetFullCombatState` | no | not in the checksum, so never detected in the first place |
@@ -169,6 +170,14 @@ repairable.
 - State that other mods keep per card or orb instance, outside `NetFullCombatState`, cannot be
   carried over when a card is created.
 - An HP repair can set a creature to 0 HP without the game's death handling.
+- A removed enemy's death hooks (relics or powers that react to a kill) do not run on the client; their
+  effects arrive with the host's state only where `NetFullCombatState` covers them. Removal waits for
+  the players' turn, because a monster can still start its move after the last check. Removing the
+  last enemy has only been run by the self-test.
+- Creatures carry no ID in the snapshot, so identical monsters are told apart by HP. If two copies
+  are close in HP and one died on the host, the wrong copy can be removed.
+- An orb created by a resync starts without other mods' per-orb state, and is not counted in the
+  combat history as channeled. If the host has more orbs than we have slots, orbs are not repaired.
 - A power the host has at amount 0 cannot be added (`ApplyInternal` ignores 0), so that difference
   stays.
 - The snapshot does not say which potion slots the host's potions sit in, so potions are only
@@ -234,19 +243,25 @@ drift kinds tab-complete. **Debug builds only** (`#if DEBUG`): Release builds sh
 drift kind it snapshots the live state as the "host truth", drifts the live state the way a
 diverged client would look, snapshots that as the client's own checkpoint, runs
 `HostStateApplier.Apply`, and asserts that the live state hashes back to the truth with the game's
-own `ChecksumTracker.GenerateChecksum`, that every combat card ID is back in its slot, and that
-every card in the piles belongs to the combat scope. The kinds: energy, gold, run RNG, player RNG,
-enemy HP, block, power amount, pile order, extra card, potion, relic, orb order, choice ids, two
-identical cards swapping places (`swapids`), a vanished card (`losecard`) and a vanished power
-(`losepower`). A kind whose precondition is missing (an empty draw pile, no free potion slot)
-reports SKIP. The full run adds `energy-delta`, a lockstep action after the checkpoint that the
-merge has to keep. `divergence selftest <kind>` runs one; failures print a line diff of the two state
-dumps and of the two ID layouts.
+own `ChecksumTracker.GenerateChecksum`, that every combat card ID is back in its slot, that every
+card in the piles belongs to the combat scope, and that the orb display shows the orbs. The
+kinds: energy, gold, run RNG, player RNG, enemy HP, block, power amount, pile order, extra card,
+potion, relic, orb order, choice ids, two identical cards swapping places (`swapids`), a
+vanished card (`losecard`), a vanished power (`losepower`) and a vanished orb (`loseorb`). Two
+scenarios change the host snapshot instead: `dropenemy` (an enemy only we still have; needs two
+living enemies) and `dropallenemies` (every enemy; the combat ends, so it only runs when named).
+`removeenemy` is co-op only. A kind whose precondition is missing (an empty draw pile, no free
+potion slot) reports SKIP. The full run adds `energy-delta`, a lockstep
+action after the checkpoint that the merge has to keep. `divergence selftest <kind>` runs one;
+failures print a line diff of the two state dumps and of the two ID layouts.
 
 **Real second player: `divergence desync <kind>`.** Drifts only the peer that runs it (the command is not
-networked), so the next checkpoint diverges for real; `divergence status` prints strike counts and the
-last resync result. `tools/localmp.sh` starts one host and N clients of the installed game over
-ENet on `127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
+networked), so the next checkpoint diverges for real. Run it on a client, except `removeenemy`, which
+runs on the host only (in a fight with two or more enemies) and leaves the client with a monster the
+host no longer has. `loseorb` on a client makes the client recreate an orb; on the host, the client
+has to remove one. `divergence status` prints strike counts and the last resync result.
+`tools/localmp.sh` starts one host and N clients of the installed game over ENet on
+`127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
 `--fastmp=join --clientId=1001` developer shortcut. It looks for the macOS install by default; set
 `STS2_APP` elsewhere.
 
