@@ -3,7 +3,7 @@
   "name": "Host State Resync",
   "author": "BSchneppe",
   "description": "When a multiplayer state divergence is detected, keeps the client connected and overwrites its combat state with the host's instead of kicking it. Every peer must run this mod.",
-  "version": "v0.2.0",
+  "version": "v0.3.0",
   "has_pck": false,
   "has_dll": true,
   "dependencies": [],
