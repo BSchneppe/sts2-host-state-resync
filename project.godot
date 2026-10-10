@@ -2,12 +2,12 @@ config_version=5
 
 [application]
 
-config/name="HostStateResync"
+config/name="SlayTheDivergence"
 config/features=PackedStringArray("4.5", "C#", "Mobile")
 
 [dotnet]
 
-project/assembly_name="HostStateResync"
+project/assembly_name="SlayTheDivergence"
 
 [rendering]
 

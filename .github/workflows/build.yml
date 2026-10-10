@@ -24,14 +24,14 @@ jobs:
         run: dotnet restore -p:RefAssembliesVersion=${{ matrix.ref-assemblies }}
       - name: Build (Release)
         run: dotnet build -c Release --no-restore -p:RefAssembliesVersion=${{ matrix.ref-assemblies }}
-      # Debug compiles the `hsr` test command, which Release leaves out.
+      # Debug compiles the `divergence` test command, which Release leaves out.
       - name: Build (Debug)
         run: dotnet build -c Debug --no-restore -p:RefAssembliesVersion=${{ matrix.ref-assemblies }}
 
       # Compiling is not enough: Harmony binds patch targets by name at runtime. This checks every
       # [HarmonyPatch] target type exists and declares the member. Reference assemblies keep only the
       # public surface, so the private targets are exempted here and checked by the patch-time log line
-      # ("HostStateResync initialized") in game instead.
+      # ("SlayTheDivergence initialized") in game instead.
       - name: Audit Harmony patch targets
         run: |
           dotnet run --project tools/PatchAudit -- . \

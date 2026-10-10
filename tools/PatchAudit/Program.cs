@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Text.RegularExpressions;
 
-namespace HostStateResync.Tools.PatchAudit;
+namespace SlayTheDivergence.Tools.PatchAudit;
 
 /// <summary>
 /// Verifies that every Harmony patch target in the mod actually resolves against a given

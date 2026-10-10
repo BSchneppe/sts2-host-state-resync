@@ -31,7 +31,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build
-          path: .godot/mono/temp/bin/Release/HostStateResync.dll
+          path: .godot/mono/temp/bin/Release/SlayTheDivergence.dll
 
   release:
     needs: build
@@ -47,8 +47,8 @@ jobs:
       # id-version, so a release whose manifest kept the old version would pair with the wrong peers.
       - name: Check manifest version matches tag
         run: |
-          manifest="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' HostStateResync.json | sed -E 's/.*"(v?[^"]+)"$/\1/')"
-          [ "$manifest" = "$GITHUB_REF_NAME" ] || { echo "HostStateResync.json says $manifest, tag is $GITHUB_REF_NAME"; exit 1; }
+          manifest="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' SlayTheDivergence.json | sed -E 's/.*"(v?[^"]+)"$/\1/')"
+          [ "$manifest" = "$GITHUB_REF_NAME" ] || { echo "SlayTheDivergence.json says $manifest, tag is $GITHUB_REF_NAME"; exit 1; }
       - name: Download build
         uses: actions/download-artifact@v4
         with:
@@ -56,15 +56,15 @@ jobs:
           path: artifacts
       - name: Package
         run: |
-          mkdir -p release/HostStateResync
-          cp artifacts/HostStateResync.dll release/HostStateResync/
-          cp HostStateResync.json release/HostStateResync/
+          mkdir -p release/SlayTheDivergence
+          cp artifacts/SlayTheDivergence.dll release/SlayTheDivergence/
+          cp SlayTheDivergence.json release/SlayTheDivergence/
           cd release
-          zip -r ../HostStateResync-v${{ steps.version.outputs.version }}.zip HostStateResync
+          zip -r ../SlayTheDivergence-v${{ steps.version.outputs.version }}.zip SlayTheDivergence
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: HostStateResync-v${{ steps.version.outputs.version }}.zip
+          files: SlayTheDivergence-v${{ steps.version.outputs.version }}.zip
           generate_release_notes: true
           draft: false
           prerelease: false

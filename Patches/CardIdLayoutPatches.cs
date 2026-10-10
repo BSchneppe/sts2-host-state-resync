@@ -1,22 +1,22 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
-using HostStateResync.Resync;
+using SlayTheDivergence.Resync;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace HostStateResync.Patches;
+namespace SlayTheDivergence.Patches;
 
 /// <summary>
 /// Wires <see cref="CardIdLayout"/> into each run's <see cref="ChecksumTracker"/>: every peer records its card IDs at
 /// every checkpoint (through the tracker's own <c>ChecksumGenerated</c> event, which fires before any comparison), and
-/// listens for the host's <see cref="HsrCardIdLayoutMessage"/>. <see cref="CompareChecksumsPatch"/> sends it.
+/// listens for the host's <see cref="DivergenceCardIdLayoutMessage"/>. <see cref="CompareChecksumsPatch"/> sends it.
 /// </summary>
 [HarmonyPatch(typeof(ChecksumTracker), MethodType.Constructor, typeof(INetGameService), typeof(IRunState))]
 public static class ChecksumTrackerCtorPatch
 {
-    private static readonly MessageHandlerDelegate<HsrCardIdLayoutMessage> Handler = OnLayoutReceived;
+    private static readonly MessageHandlerDelegate<DivergenceCardIdLayoutMessage> Handler = OnLayoutReceived;
 
     public static void Postfix(ChecksumTracker __instance, INetGameService netService, IRunState runState)
     {
@@ -48,7 +48,7 @@ public static class ChecksumTrackerCtorPatch
         }
     }
 
-    private static void OnLayoutReceived(HsrCardIdLayoutMessage message, ulong senderId)
+    private static void OnLayoutReceived(DivergenceCardIdLayoutMessage message, ulong senderId)
     {
         CardIdLayouts.ReceiveFromHost(message.checksumId, message.layout);
         MainFile.Logger.Debug($"Host card IDs for checksum #{message.checksumId}: {message.layout}");

@@ -6,9 +6,9 @@
 #   tools/localmp.sh 2          # host + 2 clients
 #
 # Then in the host: pick characters, start the run, walk into a fight. Open the dev console (` key) on the CLIENT
-# window and run `hsr desync rng` (or energy, hp, shuffle, ...). At the next checkpoint the host log shows
-# "diverged ... keeping it connected" and the client log shows "[HostStateResync] checksum #N: applied ...".
-# `hsr selftest` needs no second instance at all; it runs in a singleplayer combat only.
+# window and run `divergence desync rng` (or energy, hp, shuffle, ...). At the next checkpoint the host log shows
+# "diverged ... keeping it connected" and the client log shows "[SlayTheDivergence] checksum #N: applied ...".
+# `divergence selftest` needs no second instance at all; it runs in a singleplayer combat only.
 #
 # Both instances share the same save directory; that is fine for a throwaway test run.
 set -euo pipefail

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Publishes the HostStateResync mod to the Steam Workshop via steamcmd.
+# Publishes the SlayTheDivergence mod to the Steam Workshop via steamcmd.
 #
 # One-time setup:
 #   1. Fill in APP_ID below (from the STS2 store page URL:
@@ -73,21 +73,21 @@ CREATING=false
 [[ -z "$PUBLISHED_FILE_ID" ]] && CREATING=true
 
 # ── 1. Build (Release, against the pinned reference assemblies) ─────────
-echo ">> Building HostStateResync (Release)..."
-"$DOTNET" build -c Release "$REPO/HostStateResync.csproj"
+echo ">> Building SlayTheDivergence (Release)..."
+"$DOTNET" build -c Release "$REPO/SlayTheDivergence.csproj"
 
 # Godot.NET.Sdk emits to .godot/mono/temp/bin/<Config>/, not the default bin/ path.
 DLL=""
 for cand in \
-  "$REPO/.godot/mono/temp/bin/Release/HostStateResync.dll" \
-  "$REPO/bin/Release/net9.0/HostStateResync.dll"; do
+  "$REPO/.godot/mono/temp/bin/Release/SlayTheDivergence.dll" \
+  "$REPO/bin/Release/net9.0/SlayTheDivergence.dll"; do
   [[ -f "$cand" ]] && { DLL="$cand"; break; }
 done
-[[ -n "$DLL" ]] || DLL="$(find "$REPO/.godot" "$REPO/bin" -name HostStateResync.dll -path '*Release*' 2>/dev/null | head -n1)"
-[[ -n "$DLL" && -f "$DLL" ]] || err "built HostStateResync.dll not found (looked in .godot/mono/temp/bin/Release and bin/Release/net9.0)."
+[[ -n "$DLL" ]] || DLL="$(find "$REPO/.godot" "$REPO/bin" -name SlayTheDivergence.dll -path '*Release*' 2>/dev/null | head -n1)"
+[[ -n "$DLL" && -f "$DLL" ]] || err "built SlayTheDivergence.dll not found (looked in .godot/mono/temp/bin/Release and bin/Release/net9.0)."
 
-JSON="$REPO/HostStateResync.json"
-[[ -f "$JSON" ]] || err "HostStateResync.json not found at $JSON"
+JSON="$REPO/SlayTheDivergence.json"
+[[ -f "$JSON" ]] || err "SlayTheDivergence.json not found at $JSON"
 
 
 VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$JSON" | sed -E 's/.*"version".*"(.*)"/\1/')"
@@ -116,7 +116,7 @@ VDF="$REPO/build/workshop_item.vdf"
   elif [[ -n "$VISIBILITY" ]]; then
     echo "    \"visibility\"      \"$VISIBILITY\""
   fi
-  echo "    \"title\"           \"Host State Resync\""
+  echo "    \"title\"           \"Slay the Divergence (Co-op Desync Fix)\""
   echo "    \"changenote\"      \"$CHANGENOTE\""
   if [[ -f "$REPO/$PREVIEW" ]]; then
     echo "    \"previewfile\"     \"$REPO/$PREVIEW\""

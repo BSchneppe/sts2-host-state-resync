@@ -3,8 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using HostStateResync.Patches;
-using HostStateResync.Resync;
+using SlayTheDivergence.Patches;
+using SlayTheDivergence.Resync;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.DevConsole;
 using MegaCrit.Sts2.Core.DevConsole.ConsoleCommands;
@@ -16,28 +16,28 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace HostStateResync.Testing;
+namespace SlayTheDivergence.Testing;
 
 /// <summary>
-/// Dev-console command <c>hsr</c>. Discovered automatically by the game's <c>DevConsole</c>, which scans mod assemblies
+/// Dev-console command <c>divergence</c>. Discovered automatically by the game's <c>DevConsole</c>, which scans mod assemblies
 /// for <see cref="AbstractConsoleCmd"/> subclasses; debug commands are enabled whenever the game runs modded.
 ///
-/// <c>hsr selftest</c>: in a singleplayer combat (it refuses co-op), for each scenario: snapshot the current state as the
+/// <c>divergence selftest</c>: in a singleplayer combat (it refuses co-op), for each scenario: snapshot the current state as the
 /// "host truth", perturb the live state as if this peer had drifted, snapshot that as the peer's own checkpoint,
 /// run <see cref="HostStateApplier"/> and check that the live state hashes to the truth again. This is a fake second
 /// player: the host snapshot is synthesized instead of received.
 ///
-/// <c>hsr desync &lt;kind&gt;</c>: perturb the live state on THIS peer only (the command is not networked). Run it on
+/// <c>divergence desync &lt;kind&gt;</c>: perturb the live state on THIS peer only (the command is not networked). Run it on
 /// the client of a real two-instance session (see tools/localmp.sh); the next checkpoint diverges and the mod has to
 /// heal it for real.
 ///
-/// <c>hsr status</c>: host strike counters and the last resync result.
+/// <c>divergence status</c>: host strike counters and the last resync result.
 /// </summary>
-public class HsrConsoleCmd : AbstractConsoleCmd
+public class DivergenceConsoleCmd : AbstractConsoleCmd
 {
-    public override string CmdName => "hsr";
+    public override string CmdName => "divergence";
     public override string Args => "selftest [scenario] | desync <kind> | list | status";
-    public override string Description => "HostStateResync: self-test the resync against a synthetic host snapshot, or drift this peer on purpose.";
+    public override string Description => "Slay the Divergence: self-test the resync against a synthetic host snapshot, or drift this peer on purpose.";
     public override bool IsNetworked => false;
 
     public static ResyncResult? LastResult { get; set; }
@@ -167,7 +167,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
     {
         if (args.Length == 0)
         {
-            return new CmdResult(success: false, $"Usage: hsr {Args}");
+            return new CmdResult(success: false, $"Usage: divergence {Args}");
         }
         try
         {
@@ -181,7 +181,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                 {
                     if (args.Length < 2 || !Perturbations.TryGetValue(args[1], out var perturb))
                     {
-                        return new CmdResult(success: false, "Usage: hsr desync <kind>; kinds: " + string.Join(", ", Perturbations.Keys));
+                        return new CmdResult(success: false, "Usage: divergence desync <kind>; kinds: " + string.Join(", ", Perturbations.Keys));
                     }
                     var (run, me) = RequireCombat(issuingPlayer);
                     perturb(run, me);
@@ -192,10 +192,10 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                 case "selftest":
                 {
                     // The self-test rewrites the live state and only puts back what a resync repairs. In co-op a
-                    // scenario that fails would leave real drift behind; there, drift one peer with hsr desync instead.
+                    // scenario that fails would leave real drift behind; there, drift one peer with divergence desync instead.
                     if (RunManager.Instance.NetService?.Type is NetGameType.Host or NetGameType.Client)
                     {
-                        return new CmdResult(success: false, "hsr selftest only runs in singleplayer; in co-op use hsr desync <kind>.");
+                        return new CmdResult(success: false, "divergence selftest only runs in singleplayer; in co-op use divergence desync <kind>.");
                     }
                     var (run, me) = RequireCombat(issuingPlayer);
                     var names = args.Length >= 2 ? new[] { args[1] } : Perturbations.Keys.ToArray();
@@ -204,7 +204,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
                     return new CmdResult(report.allPassed, report.text);
                 }
                 default:
-                    return new CmdResult(success: false, $"Unknown subcommand '{args[0]}'. Usage: hsr {Args}");
+                    return new CmdResult(success: false, $"Unknown subcommand '{args[0]}'. Usage: divergence {Args}");
             }
         }
         catch (Exception e)
@@ -315,7 +315,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
 
         if (!includeDelta)
         {
-            sb.Insert(0, $"hsr selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
+            sb.Insert(0, $"divergence selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
             return (all, sb.ToString().TrimEnd());
         }
 
@@ -342,7 +342,7 @@ public class HsrConsoleCmd : AbstractConsoleCmd
             sb.AppendLine($"energy-delta: ERROR {e.GetType().Name}: {e.Message}");
         }
 
-        sb.Insert(0, $"hsr selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
+        sb.Insert(0, $"divergence selftest: {(all ? "ALL PASSED" : "FAILURES")}\n");
         return (all, sb.ToString().TrimEnd());
     }
 

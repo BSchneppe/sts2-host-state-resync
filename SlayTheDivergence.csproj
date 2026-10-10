@@ -2,8 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <RootNamespace>HostStateResync</RootNamespace>
-    <AssemblyName>HostStateResync</AssemblyName>
+    <RootNamespace>SlayTheDivergence</RootNamespace>
+    <AssemblyName>SlayTheDivergence</AssemblyName>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <LangVersion>latest</LangVersion>
@@ -51,7 +51,7 @@
   </ItemGroup>
 
   <Target Name="CopyModFiles" AfterTargets="Build" Condition="Exists('$(STS2ModsDir)')">
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(STS2ModsDir)/HostStateResync" />
-    <Copy SourceFiles="HostStateResync.json" DestinationFolder="$(STS2ModsDir)/HostStateResync" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(STS2ModsDir)/SlayTheDivergence" />
+    <Copy SourceFiles="SlayTheDivergence.json" DestinationFolder="$(STS2ModsDir)/SlayTheDivergence" />
   </Target>
 </Project>

@@ -1,6 +1,9 @@
 [![Build](https://github.com/BSchneppe/sts2-host-state-resync/actions/workflows/build.yml/badge.svg)](https://github.com/BSchneppe/sts2-host-state-resync/actions/workflows/build.yml)
 
-# Host State Resync (Slay the Spire 2 mod)
+# Slay the Divergence (Slay the Spire 2 mod)
+
+Formerly "Host State Resync" (mod ID `HostStateResync`). When upgrading from it, delete the old
+`mods/HostStateResync/` folder, or both copies load.
 
 When co-op detects a state divergence, vanilla kicks the client back to the main menu with a
 "state divergence" error. This mod keeps the client in the game and repairs its combat state from
@@ -12,7 +15,7 @@ Built against game `v0.111.0` (`41cef1ea`).
 
 ## Status
 
-- 2026-09-24: `hsr selftest` (see Testing) passed every scenario in a live singleplayer fight.
+- 2026-09-24: `divergence selftest` (see Testing) passed every scenario in a live singleplayer fight.
 - 2026-10-09, two-player Steam sessions:
   - v0.1.0: several drifts at once (energy, gold, run RNG, player RNG, enemy HP, block) healed in
     one resync. The pile-order repair left identical cards holding each other's network IDs, which
@@ -108,7 +111,7 @@ do not run, so their hooks and VFX do not fire; a few setters still raise their 
 left the hand lose their node, cards that came in get one at their place in the pile; cards already
 shown keep their order. The orb display is not synced, so its order and the front-orb highlight can
 be off until the orbs next change, and potion, relic and power displays may show their old order.
-Both sides get a short on-screen text and a full per-field log line tagged `[HostStateResync]`.
+Both sides get a short on-screen text and a full per-field log line tagged `[SlayTheDivergence]`.
 
 ### Card IDs
 
@@ -116,7 +119,7 @@ A card play travels over the network as "combat card 23" (`NetCombatCardDb`), an
 cancels the play if its card 23 is not in hand. The checksum only sees card values, so a rebuild
 that puts two identical Strikes back in each other's slots hashes clean and still breaks the next
 play of either. Every peer therefore records which ID sits in which pile slot at every checkpoint,
-and on a mismatch the host sends its layout (`HsrCardIdLayoutMessage`) on the reliable channel just
+and on a mismatch the host sends its layout (`DivergenceCardIdLayoutMessage`) on the reliable channel just
 before the vanilla divergence message.
 
 The client matches its cards to the host's slots in passes, strictest first: the same card state
@@ -177,8 +180,8 @@ repairable.
 Every player in the run needs the same version: the game compares gameplay mods by id and version
 when someone joins.
 
-1. Download `HostStateResync-vX.Y.Z.zip` from [Releases](../../releases)
-2. Unzip it into `Slay the Spire 2/mods/`, so the files end up in `mods/HostStateResync/`
+1. Download `SlayTheDivergence-vX.Y.Z.zip` from [Releases](../../releases)
+2. Unzip it into `Slay the Spire 2/mods/`, so the files end up in `mods/SlayTheDivergence/`
 3. Launch the game and enable the mod in the Mods menu
 
 ## Building from source
@@ -187,12 +190,12 @@ Requires the [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0).
 
 ```bash
 dotnet build -c Release   # what Releases and the Workshop ship
-dotnet build -c Debug     # adds the hsr test command (see Testing)
+dotnet build -c Debug     # adds the divergence test command (see Testing)
 ```
 
 With Slay the Spire 2 installed, the build references `sts2.dll`, `0Harmony.dll` and `GodotSharp.dll`
-from the game and copies `HostStateResync.dll` and `HostStateResync.json` into
-`mods/HostStateResync/`. The paths are auto-detected on macOS, Windows and Linux; override them with
+from the game and copies `SlayTheDivergence.dll` and `SlayTheDivergence.json` into
+`mods/SlayTheDivergence/`. The paths are auto-detected on macOS, Windows and Linux; override them with
 `-p:STS2GameDir=/path/to/game/data -p:STS2ModsDir=/path/to/mods`. Without a game install (CI), the
 build uses the `BSchneppe.Sts2.ReferenceAssemblies` NuGet package for the version in
 `RefAssembliesVersion`.
@@ -207,27 +210,27 @@ dotnet run --project tools/PatchAudit -- . "<game data dir>/sts2.dll"
 
 ## Publishing
 
-- **GitHub Release:** push a tag `vX.Y.Z` that matches the version in `HostStateResync.json`. The
-  Release workflow builds Release, audits the patch targets and attaches `HostStateResync-vX.Y.Z.zip`.
+- **GitHub Release:** push a tag `vX.Y.Z` that matches the version in `SlayTheDivergence.json`. The
+  Release workflow builds Release, audits the patch targets and attaches `SlayTheDivergence-vX.Y.Z.zip`.
 - **Steam Workshop:** `STEAM_USER=<account> ./publish.sh "change note"` builds Release and uploads it
   with steamcmd. The first run creates a private item and saves its ID to `.workshop_id`.
 
 ## Verifying it works
 
 1. Start a co-op run with every player on the same version. The game's log (`logs/godot.log` in
-   the game's user data folder) contains `HostStateResync initialized` once the patches are in.
-2. Drift one peer on purpose with a Debug build (`hsr desync <kind>`, see Testing).
+   the game's user data folder) contains `SlayTheDivergence initialized` once the patches are in.
+2. Drift one peer on purpose with a Debug build (`divergence desync <kind>`, see Testing).
 3. At the next checkpoint the host log shows `Client <id> diverged ... keeping it connected`, the
-   client log shows `[HostStateResync] checksum #N: applied ... fix(es)`, and the checkpoint after
+   client log shows `[SlayTheDivergence] checksum #N: applied ... fix(es)`, and the checkpoint after
    that produces no divergence message.
 
 ## Testing
 
 Both layers are driven from the in-game dev console (the key left of 1; debug commands are enabled
-whenever the game runs modded). The command is `Testing/HsrConsoleCmd.cs`, and its subcommands and
-drift kinds tab-complete. **Debug builds only** (`#if DEBUG`): Release builds ship without `hsr`.
+whenever the game runs modded). The command is `Testing/DivergenceConsoleCmd.cs`, and its subcommands and
+drift kinds tab-complete. **Debug builds only** (`#if DEBUG`): Release builds ship without `divergence`.
 
-**Fake second player, no network: `hsr selftest`.** Singleplayer only, in any combat. For every
+**Fake second player, no network: `divergence selftest`.** Singleplayer only, in any combat. For every
 drift kind it snapshots the live state as the "host truth", drifts the live state the way a
 diverged client would look, snapshots that as the client's own checkpoint, runs
 `HostStateApplier.Apply`, and asserts that the live state hashes back to the truth with the game's
@@ -237,11 +240,11 @@ enemy HP, block, power amount, pile order, extra card, potion, relic, orb order,
 identical cards swapping places (`swapids`), a vanished card (`losecard`) and a vanished power
 (`losepower`). A kind whose precondition is missing (an empty draw pile, no free potion slot)
 reports SKIP. The full run adds `energy-delta`, a lockstep action after the checkpoint that the
-merge has to keep. `hsr selftest <kind>` runs one; failures print a line diff of the two state
+merge has to keep. `divergence selftest <kind>` runs one; failures print a line diff of the two state
 dumps and of the two ID layouts.
 
-**Real second player: `hsr desync <kind>`.** Drifts only the peer that runs it (the command is not
-networked), so the next checkpoint diverges for real; `hsr status` prints strike counts and the
+**Real second player: `divergence desync <kind>`.** Drifts only the peer that runs it (the command is not
+networked), so the next checkpoint diverges for real; `divergence status` prints strike counts and the
 last resync result. `tools/localmp.sh` starts one host and N clients of the installed game over
 ENet on `127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
 `--fastmp=join --clientId=1001` developer shortcut. It looks for the macOS install by default; set

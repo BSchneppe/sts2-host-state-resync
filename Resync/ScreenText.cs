@@ -3,7 +3,7 @@ using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Vfx;
 
-namespace HostStateResync.Resync;
+namespace SlayTheDivergence.Resync;
 
 /// <summary>Non-blocking on-screen notice, using the same fullscreen text VFX the game uses for debug hotkeys.</summary>
 public static class ScreenText

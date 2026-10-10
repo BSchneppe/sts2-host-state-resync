@@ -11,7 +11,7 @@ using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Multiplayer.Transport;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace HostStateResync.Resync;
+namespace SlayTheDivergence.Resync;
 
 /// <summary>
 /// Which combat card ID sits at which position of every combat pile, plus the next ID to be handed out.
@@ -141,7 +141,7 @@ public struct PileCardIds : IPacketSerializable
 /// <see cref="CardIdLayout"/> at that checksum. Both go out on the reliable channel, so this one arrives first.
 /// The game registers mod message types itself (<c>MessageTypes.Initialize</c>), so every peer needs this build.
 /// </summary>
-public struct HsrCardIdLayoutMessage : INetMessage
+public struct DivergenceCardIdLayoutMessage : INetMessage
 {
     public uint checksumId;
     public CardIdLayout layout;

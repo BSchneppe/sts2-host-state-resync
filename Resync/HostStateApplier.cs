@@ -22,7 +22,7 @@ using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.Runs;
 
-namespace HostStateResync.Resync;
+namespace SlayTheDivergence.Resync;
 
 /// <summary>
 /// Writes the host's <see cref="NetFullCombatState"/> snapshot into the client's live run state.
@@ -1267,7 +1267,7 @@ public sealed class ResyncResult
     public string ToLogString()
     {
         var sb = new StringBuilder();
-        sb.Append($"[HostStateResync] checksum #{ChecksumId}: applied {_fixed.Count} fix(es), skipped {_skipped.Count}, failed {_failed.Count}");
+        sb.Append($"[SlayTheDivergence] checksum #{ChecksumId}: applied {_fixed.Count} fix(es), skipped {_skipped.Count}, failed {_failed.Count}");
         sb.Append(HadBaseline ? " (three-way merge against our own checkpoint snapshot)" : " (no local checkpoint snapshot; host values applied as-is)");
         foreach (var f in _fixed) sb.Append("\n  fixed   ").Append(f);
         foreach (var s in _skipped) sb.Append("\n  skipped ").Append(s);

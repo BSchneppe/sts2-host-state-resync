@@ -1,6 +1,6 @@
 {
-  "id": "HostStateResync",
-  "name": "Host State Resync",
+  "id": "SlayTheDivergence",
+  "name": "Slay the Divergence",
   "author": "BSchneppe",
   "description": "When a multiplayer state divergence is detected, keeps the client connected and overwrites its combat state with the host's instead of kicking it. Every peer must run this mod.",
   "version": "v0.3.0",

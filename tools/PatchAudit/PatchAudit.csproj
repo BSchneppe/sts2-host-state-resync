@@ -5,7 +5,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>HostStateResync.Tools.PatchAudit</RootNamespace>
+    <RootNamespace>SlayTheDivergence.Tools.PatchAudit</RootNamespace>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

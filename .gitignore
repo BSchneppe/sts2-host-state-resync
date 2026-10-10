@@ -8,7 +8,7 @@ build/
 .godot/
 *.pck
 
-# Local mod bundles (Debug builds with the hsr test command); releases come from CI
+# Local mod bundles (Debug builds with the divergence test command); releases come from CI
 dist/
 *.zip
 

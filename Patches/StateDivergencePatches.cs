@@ -5,14 +5,14 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
-using HostStateResync.Resync;
+using SlayTheDivergence.Resync;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Messages.Game.Checksums;
 using MegaCrit.Sts2.Core.Runs;
 
-namespace HostStateResync.Patches;
+namespace SlayTheDivergence.Patches;
 
 /// <summary>
 /// Vanilla flow on a checksum mismatch:
@@ -164,7 +164,7 @@ public static class OnReceivedStateDivergenceMessagePatch
                 ResyncFence.Set(__instance, __instance.NextId);
             }
 #if DEBUG
-            Testing.HsrConsoleCmd.LastResult = result;
+            Testing.DivergenceConsoleCmd.LastResult = result;
 #endif
             MainFile.Logger.Info(result.ToLogString());
             ScreenText.Show(result.ToScreenString());
@@ -219,7 +219,7 @@ public static class CompareChecksumsPatch
                 MainFile.Logger.Warn($"No card ID layout recorded for checksum #{local.id}; client {remoteId} will rebuild piles by value");
                 return;
             }
-            netService.SendMessage(new HsrCardIdLayoutMessage { checksumId = local.id, layout = layout.Value }, remoteId);
+            netService.SendMessage(new DivergenceCardIdLayoutMessage { checksumId = local.id, layout = layout.Value }, remoteId);
         }
         catch (Exception e)
         {
