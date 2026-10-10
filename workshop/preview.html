@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0b14; }
+  .tile {
+    width: 512px; height: 512px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 40%, #2c4a5e 0%, #1a2433 38%, #0f0d18 75%);
+    font-family: "Futura", "Avenir Next", sans-serif;
+  }
+  .frame {
+    position: absolute; inset: 14px; border-radius: 22px;
+    border: 4px solid #c9a24a;
+    box-shadow: inset 0 0 0 2px #5a4320, inset 0 0 40px rgba(0,0,0,.6);
+  }
+  svg.icon { position: absolute; left: 96px; top: 40px; width: 320px; height: 293px; }
+  .title {
+    position: absolute; left: 0; right: 0; top: 330px; text-align: center;
+    font-family: "Impact", "Futura", sans-serif; font-size: 46px; letter-spacing: 1px;
+    color: #f3e3b5; line-height: 1;
+    text-shadow: 0 3px 0 #5a4320, 0 6px 14px rgba(0,0,0,.8);
+  }
+  .banner {
+    position: absolute; left: 40px; right: 40px; top: 396px; padding: 9px 0 8px; text-align: center;
+    background: rgba(140, 30, 30, .85); border: 2px solid #e0705a; border-radius: 8px;
+    color: #ffe3d6; font-size: 21px; font-weight: 700; letter-spacing: .5px;
+    text-shadow: 0 2px 4px rgba(0,0,0,.7);
+  }
+  .banner s { text-decoration-thickness: 3px; text-decoration-color: #ffb199; }
+  .sub {
+    position: absolute; left: 0; right: 0; top: 450px; text-align: center;
+    font-size: 18px; font-weight: 600; letter-spacing: .5px; color: #9fd3d9;
+    text-shadow: 0 2px 6px rgba(0,0,0,.9);
+  }
+</style>
+</head>
+<body>
+<div class="tile">
+  <div class="frame"></div>
+  <svg class="icon" viewBox="0 0 360 330">
+    <defs>
+      <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffe7a3"/><stop offset="1" stop-color="#c9902e"/>
+      </linearGradient>
+      <linearGradient id="teal" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#a6f0ea"/><stop offset="1" stop-color="#2f8f9a"/>
+      </linearGradient>
+      <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+        <feGaussianBlur stdDeviation="6" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <g fill="none" stroke-width="16" stroke-linecap="round" filter="url(#glow)">
+      <path d="M 52 140 A 130 130 0 0 1 286 92" stroke="url(#gold)"/>
+      <path d="M 308 190 A 130 130 0 0 1 74 238" stroke="url(#teal)"/>
+    </g>
+    <polygon points="306,62 314,122 258,106" fill="#f0c766" filter="url(#glow)"/>
+    <polygon points="54,268 46,208 102,224" fill="#62c7c9" filter="url(#glow)"/>
+    <g transform="translate(118,165)">
+      <path d="M -26 -78 L -16 -60 L 0 -76 L 16 -60 L 26 -78 L 22 -52 L -22 -52 Z" fill="url(#gold)"/>
+      <circle cx="0" cy="-26" r="24" fill="url(#gold)"/>
+      <path d="M -46 46 C -46 8 -26 -2 0 -2 C 26 -2 46 8 46 46 Z" fill="url(#gold)"/>
+    </g>
+    <g transform="translate(242,165)">
+      <circle cx="0" cy="-26" r="24" fill="url(#teal)"/>
+      <path d="M -46 46 C -46 8 -26 -2 0 -2 C 26 -2 46 8 46 46 Z" fill="url(#teal)"/>
+    </g>
+    <g stroke="#f3e3b5" stroke-width="7" stroke-linecap="round" fill="none" opacity=".9">
+      <path d="M 166 186 L 194 186"/>
+      <circle cx="180" cy="186" r="4" fill="#f3e3b5" stroke="none"/>
+    </g>
+  </svg>
+  <div class="title">SLAY THE DIVERGENCE</div>
+  <div class="banner"><s>Multiplayer state divergence</s></div>
+  <div class="sub">Co-op desync fix. Resync, don't kick.</div>
+</div>
+</body>
+</html>

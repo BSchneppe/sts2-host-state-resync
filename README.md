@@ -242,7 +242,9 @@ dotnet run --project tools/PatchAudit -- . "<game data dir>/sts2.dll"
 - **GitHub Release:** push a tag `vX.Y.Z` that matches the version in `SlayTheDivergence.json`. The
   Release workflow builds Release, audits the patch targets and attaches `SlayTheDivergence-vX.Y.Z.zip`.
 - **Steam Workshop:** `STEAM_USER=<account> ./publish.sh "change note"` builds Release and uploads it
-  with steamcmd. The first run creates a private item and saves its ID to `.workshop_id`.
+  with steamcmd. The first run creates a private item and saves its ID to `.workshop_id`. It sets the
+  title and the preview image (`workshop_preview.png`); paste `workshop/description.bbcode` into the
+  item's description and upload `workshop/screenshots/*` by hand on the Workshop page.
 
 ## Verifying it works
 

@@ -1,0 +1,35 @@
+[h1]No more co-op desync kicks[/h1]
+
+In vanilla co-op (multiplayer), the moment your game and the host's disagree about the combat state, you're kicked out of the run with a [b]"Multiplayer state divergence"[/b] error. [b]Slay the Divergence[/b] keeps you in the run instead: it copies the host's state onto your game, mid-combat, and play carries on.
+
+[b]Every player in the lobby needs this mod[/b] (the game's mod check enforces it).
+
+[h2]What it does[/h2]
+[list]
+[*]When your game drifts from the host's, the mod copies the host's values onto yours instead of disconnecting you.
+[*]Don't diverge. Merge. It doesn't blindly overwrite. Anything you changed since the last check, such as the card you're playing right now, is kept. Only the values that actually drifted are fixed.
+[*]It covers energy, block, HP, gold, powers, cards in every pile (by the game's own card IDs, so later plays line up), potions, relics, orbs, random-number streams, and enemies that already died in the host's game.
+[*]A notice in the corner says what was fixed, for the player who drifted and for the host. It fades by itself, and every resync of the run stays in a history you can open. The full details go to the game log.
+[*]If one player keeps drifting at every checkpoint (7 checkpoints in a row), the host gives up and kicks them as vanilla would. A truly broken client can't stall the run.
+[/list]
+
+[h2]What it can't fix[/h2]
+[list]
+[*]Turn and phase differences: if the two games disagree on whose turn it is, the mod leaves that alone.
+[*]A creature only the host has, such as a summon your game never spawned, can't be recreated. (A monster that died in the host's game but not in yours is removed.)
+[*]It doesn't fix the [i]cause[/i] of a desync. If another mod makes the games drift every turn, you'll see a resync every turn. Find that mod.
+[/list]
+
+[h2]Compatibility[/h2]
+[list]
+[*]Built for the public branch, game version 0.111.0. The beta branch is untested.
+[*]Changes gameplay, so every player needs the same version.
+[*]No dependencies. Earlier versions were tested in real co-op runs alongside common framework and larger-lobby mods.
+[*]Use only one desync-fix mod. Other mods that resync, hide or skip the state divergence check hook the same game code and can stop this one from working.
+[*]Singleplayer: it does nothing.
+[/list]
+
+[h2]Reporting problems[/h2]
+If a resync doesn't help, send both players' [b]godot.log[/b] (macOS: ~/Library/Application Support/SlayTheSpire2/logs/, Windows: %APPDATA%\SlayTheSpire2\logs\). Every resync is logged under [b][noparse][SlayTheDivergence][/noparse][/b], one line per fixed value. Open an issue on [url=https://github.com/BSchneppe/sts2-host-state-resync]GitHub[/url].
+
+Source code (MIT): [url=https://github.com/BSchneppe/sts2-host-state-resync]github.com/BSchneppe/sts2-host-state-resync[/url]
