@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -12,6 +13,8 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
+using MegaCrit.Sts2.Core.Nodes.Cards;
+using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
@@ -762,6 +765,10 @@ public static class HostStateApplier
                 pile.InvokeContentsChanged();
             }
             plan.Combat.RecalculateCardValues();
+            if (LocalContext.IsMe(plan.Player))
+            {
+                SyncHandView(plan.Combat.Hand, plan.Who, result);
+            }
             string matched = ids.Host != null ? $"{plan.ById} by card ID, {plan.ByValue} by value, " : "";
             result.Fix($"{plan.Who} card piles",
                 $"rebuilt from host ({matched}{createdHere} cards created, {plan.Leftovers.Count} removed)");
@@ -786,6 +793,44 @@ public static class HostStateApplier
                 result.Fix("card ids", $"{changed} card(s) re-keyed to the host's IDs{evicted}, next ID {nowNext} -> {after}");
             }
         }
+    }
+
+    /// <summary>
+    /// NPlayerHand builds its card nodes from the pile commands, not from pile events, so a silent rebuild leaves it
+    /// showing the old hand: cards now in hand are invisible and unplayable, cards that left stay clickable (a play of
+    /// one is cancelled on both peers). When the shown cards differ from the Hand pile, rebuild the holders from it.
+    /// </summary>
+    private static void SyncHandView(CardPile hand, string who, ResyncResult result)
+    {
+        var view = NPlayerHand.Instance;
+        if (view == null)
+        {
+            return;
+        }
+        var shown = view.ActiveHolders.Select(h => h.CardNode?.Model).ToList();
+        if (shown.SequenceEqual(hand.Cards))
+        {
+            return;
+        }
+        if (view.InCardPlay || view.IsInCardSelection)
+        {
+            result.Skip($"{who} hand view", "a card play or selection is in progress; the view catches up as cards move");
+            return;
+        }
+        foreach (var holder in view.ActiveHolders.ToList())
+        {
+            view.RemoveCardHolder(holder);
+        }
+        for (int i = 0; i < hand.Cards.Count; i++)
+        {
+            var node = NCard.Create(hand.Cards[i]);
+            if (node != null)
+            {
+                view.Add(node, i);
+            }
+        }
+        view.ForceRefreshCardIndices();
+        result.Fix($"{who} hand view", $"rebuilt from the Hand pile ({hand.Cards.Count} cards)");
     }
 
     /// <summary>The card-ID side of one resync: the layouts it works from and every player's planned pile rebuild.</summary>
