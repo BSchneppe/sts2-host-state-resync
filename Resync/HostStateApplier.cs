@@ -30,14 +30,16 @@ namespace HostStateResync.Resync;
 /// <c>baseState</c> is the client's own snapshot at N (kept by <c>ChecksumTracker</c> for the last 20 checksums),
 /// <c>hostState</c> is the host's snapshot at N, and the live objects are "now".
 /// <list type="bullet">
-/// <item>Counters (HP, block, energy, gold, power amounts, choice/reward IDs, RNG counters): the local change since N
-/// is re-applied on top of the host's value, so <c>target = host + (now - base)</c>.</item>
-/// <item>Collections (piles, potions, relics, power set): replaced by the host's version only if they have not changed
-/// locally since N. Otherwise the stale snapshot would destroy legitimate local progress; the next checkpoint will
-/// deliver a fresher snapshot if they are still different.</item>
-/// <item>RNG streams: state is loaded from the host and then advanced by the number of local draws since N.</item>
+/// <item>Anything that matched the host at N is left alone: whatever happened to it since is our own.</item>
+/// <item>Counters (HP, block, energy, gold, power amounts): see <see cref="MergeScalar"/>.</item>
+/// <item>RNG streams and sync markers: loaded from the host and advanced by the local draws since N.</item>
+/// <item>Collections (piles, potions, relics, power set, orbs): replaced by the host's version only if they have not
+/// changed locally since N, and kept in the host's order. Otherwise the stale snapshot would destroy legitimate local
+/// progress; the next checkpoint delivers a fresher snapshot if they still differ.</item>
+/// <item>Card piles and card IDs: planned for every player, validated, then applied together (<see cref="CommitPiles"/>).</item>
 /// </list>
-/// Everything runs through the game's own <c>*Internal</c> mutators so UI events fire; hooks and VFX do not.
+/// Writes go through the game's own mutators with <c>silent: true</c>, private setters and private fields: no gameplay
+/// hooks or VFX fire, and most UI is not notified; the hand view is rebuilt explicitly (<see cref="SyncHandView"/>).
 /// </summary>
 public static class HostStateApplier
 {

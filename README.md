@@ -3,13 +3,27 @@
 # Host State Resync (Slay the Spire 2 mod)
 
 When co-op detects a state divergence, vanilla kicks the client back to the main menu with a
-"state divergence" error. This mod keeps the client in the game and overwrites its combat state
-with the host's instead. **Every peer has to run it** (the manifest marks it `affects_gameplay`,
-so the game's handshake enforces that).
+"state divergence" error. This mod keeps the client in the game and repairs its combat state from
+the host's instead, and only falls back to the kick when the repair keeps failing. **Every player
+in the run has to run the same version** (the manifest marks it `affects_gameplay`, and the game's
+join check compares gameplay mods by id and version).
 
-Built against game `v0.111.0` (`41cef1ea`). `hsr selftest` (synthetic host snapshot, see Testing)
-passes all 12 scenarios in a live singleplayer fight as of 2026-09-24. A real two-client desync has
-not been exercised yet.
+Built against game `v0.111.0` (`41cef1ea`).
+
+## Status
+
+- 2026-09-24: `hsr selftest` (see Testing) passed every scenario in a live singleplayer fight.
+- 2026-10-09, two-player Steam sessions:
+  - v0.1.0: several drifts at once (energy, gold, run RNG, player RNG, enemy HP, block) healed in
+    one resync. The pile-order repair left identical cards holding each other's network IDs, which
+    led to a kick (see "Card IDs" below); v0.2.0 fixed that.
+  - v0.2.0: block, power, extra card, pile order, swapped identical cards, potion and relic drifts
+    healed. The orb drift destroyed an orb that carried another mod's per-orb bonus, which could
+    never be recreated, and the client was kicked after 7 strikes.
+- v0.3.0 reworks the repair after a code review: stale divergence messages are ignored, counters
+  are not merged across turn-start resets, card IDs are validated before any pile is rebuilt, orbs
+  are only reordered, collections keep the host's order, and the hand view is rebuilt. It builds and
+  its self-test scenarios were updated, but it has **not been run in game yet**.
 
 ## How vanilla detects and handles a desync
 
@@ -21,21 +35,20 @@ hash to the host; the host compares.
 1. Host `CompareChecksums`: mismatch → sends the client a `StateDivergenceMessage` that contains
    the host's **full `NetFullCombatState` snapshot** for that checksum id.
 2. Client `OnReceivedStateDivergenceMessage` → `LogStateDivergence`: logs both dumps, reports to
-   Sentry, echoes its own snapshot back to the host, fires `StateDiverged` (client side that only
-   writes a replay).
+   Sentry (which the game turns off when it runs modded), echoes its own snapshot back to the host,
+   fires `StateDiverged` (client side that only writes a replay).
 3. Host `OnReceivedStateDivergenceMessage`: logs both dumps, fires `StateDiverged` (host side that
    opens the error popup) and calls `DisconnectClient(sender, NetError.StateDivergence)`. That
    disconnect is what throws the client to the menu.
 
 There is no repair path in vanilla. The rejoin flow that ships full state
 (`ClientRejoinResponseMessage` with `SerializableRun` + `NetFullCombatState`) is only half done:
-the client side literally throws `NotImplementedException("Run re-joining has yet to be
-implemented!")`, and the other join screen shows a "run in progress" error. So a fix has to patch
-state in place.
+the client side throws `NotImplementedException("Run re-joining has yet to be implemented!")`. So
+a fix has to patch state in place.
 
 ## What RitsuLib hooks
 
-RitsuLib 0.6.2 is diagnostics only, it never changes the outcome:
+RitsuLib (as of 0.6.2) only adds diagnostics; it never changes the outcome:
 
 | RitsuLib patch | Game target | What it does |
 |---|---|---|
@@ -49,76 +62,109 @@ working alongside it.
 
 ## What this mod does
 
-Three Harmony patches in `Patches/StateDivergencePatches.cs`:
+Harmony patches, in `Patches/`:
 
-- `ChecksumTracker.OnReceivedStateDivergenceMessage` is replaced. Host: counts a strike for the
-  client, still logs, but does **not** disconnect unless the client has diverged more than
-  `Settings.MaxConsecutiveStrikes` (6) times without a matching checksum in between. Client: after
-  the vanilla logging, calls `HostStateApplier.Apply` with the host's snapshot.
-- `ChecksumTracker.CompareChecksums` postfix: a matching checksum resets that client's strikes.
-- `RunManager.StateDiverged` is skipped (no modal popup on host, no "abandoning run" on client),
-  except when the host has decided to kick after all. The client still writes the divergence replay.
+- `ChecksumTracker.OnReceivedStateDivergenceMessage` is replaced.
+  - Host: counts a strike for the client and still logs, but does **not** disconnect unless the
+    client diverged more than `Settings.MaxConsecutiveStrikes` (6) times without a matching
+    checksum in between.
+  - Client: ignores messages for checkpoints taken before its last resync (their snapshots still
+    carry the drift that resync repaired), skips messages whose own snapshot has fallen out of the
+    tracker's 20-entry history, and otherwise runs the vanilla logging and then
+    `HostStateApplier.Apply` with the host's snapshot.
+- `ChecksumTracker.CompareChecksums`: a prefix sends the client the host's card-ID layout for a
+  mismatching checkpoint, ahead of the vanilla `StateDivergenceMessage`; a postfix resets the
+  client's strikes on a matching checksum.
+- `RunManager.StateDiverged` is skipped (no modal popup on the host, no "abandoning run" on the
+  client), except when the host has decided to kick after all. The client still writes the replay.
+- The `ChecksumTracker` constructor records every peer's card-ID layout at every checkpoint,
+  registers the handler for the host's layouts and clears the strike counts for the new run;
+  `Dispose` unregisters the handler.
 
-`Resync/HostStateApplier.cs` does the actual override. The host snapshot is from checksum N, but
-by the time it arrives the client may have executed more lockstep actions, so it is a **three-way
-merge** against the client's own snapshot at N (the `ChecksumTracker` keeps the last 20):
+If any patch fails to apply (say, after a game update renamed a target), all of them are removed
+again and the game handles divergences as in vanilla.
 
-- counters (HP, max HP, block, energy, stars, gold, power amounts, choice ids, reward ids):
-  `target = host + (now - base)`;
-- RNG streams (run RNG set and per-player RNG set): load the host's state, then advance by the
-  number of local draws since N;
-- collections (card piles, potions, relic set and relic saved properties, relic grab bag, power
-  set): replaced with the host's version only if unchanged locally since N, otherwise left for the
-  next checkpoint, which delivers a fresher snapshot if they still differ.
+`Resync/HostStateApplier.cs` does the repair. The host's snapshot is from checkpoint N, but by the
+time it arrives the client may have run more lockstep actions, so it is a three-way merge against
+the client's own snapshot at N:
 
-Everything goes through the game's own `*Internal` mutators (`SetAmount`, `ApplyInternal`,
-`AddInternal`, `RemoveInternal`, `AddPotionInternal`, `LoadFromSerializable`, `FastForward*`) so UI
-events fire but no gameplay hooks or VFX do. Both sides get a short on-screen text and a full
-per-field log line tagged `[HostStateResync]`.
+- **Counters** (gold, max potions, energy, stars, HP, max HP, block, power amounts): left alone if
+  they matched the host at N; set to the host's value if unchanged since N; otherwise
+  `host + (now - base)`, except when a player's turn or phase moved on since N, where the change
+  may be a turn-start reset (energy refill, block clearing) and the field waits for the next
+  checkpoint.
+- **RNG streams and sync markers** (choice ids, reward ids): left alone if they matched at N;
+  otherwise loaded from the host and advanced by the local draws since N (each draw is exactly one
+  generator step).
+- **Collections** (card piles, potions, relics, power set, relic grab bag, orbs): only replaced if
+  unchanged locally since N, and put back in the host's order, which the checksum hashes.
+- **Card piles and card IDs** are planned for every player first, then the card-ID rewrite is
+  validated, and only then are both applied together (see below).
+
+The repair writes through the game's own mutators with `silent: true` or through private setters
+and fields: no gameplay hooks or VFX fire, and most UI is not told either. The hand view is rebuilt
+explicitly; potions, relics, powers and orbs may show their old order until they next change. Both
+sides get a short on-screen text and a full per-field log line tagged `[HostStateResync]`.
+
+### Card IDs
+
+A card play travels over the network as "combat card 23" (`NetCombatCardDb`), and the host silently
+cancels the play if its card 23 is not in hand. The checksum only sees card values, so a rebuild
+that puts two identical Strikes back in each other's slots hashes clean and still breaks the next
+play of either. Every peer therefore records which ID sits in which pile slot at every checkpoint,
+and on a mismatch the host sends its layout (`HsrCardIdLayoutMessage`) on the reliable channel just
+before the vanilla divergence message.
+
+The client matches its cards to the host's slots in passes, strictest first: the same card state
+(card, affliction, cost, keywords) under the host's ID, the same state under any ID, the same card
+and upgrade under the host's ID, the same card and upgrade. Missing cards are created in the combat
+scope. The ID rewrite is planned before anything changes: a host ID still held by a card that has
+left every pile (the database never forgets a card) is taken from it, while an ID held by a card
+that is still in play fails the plan, and then neither piles nor IDs are touched. IDs handed out
+locally since N move with the counter (`host + (now - base)`).
+
+The new message changes the game's network message numbering (mod message types are sorted in
+with the game's own), which is one more reason every player needs the same version.
 
 ## Which divergences are fixable
 
 `NetFullCombatState` is everything the checksum covers, so it is also the complete list of what
-can differ. The three real desyncs in the bug report from 2026-09-23 were:
-
-| Log | Context | Only difference | Fixable |
-|---|---|---|---|
-| `godot2026-09-22T20.31.24.log` | After player turn phase one end | player energy 3 vs 0 | yes, scalar |
-| `godot.log` #0 | Exiting event `HADESANCIENTS-HECATE_ANCIENT` | `Niche` RNG counter 811 vs 0 | yes, RNG state |
-| `godot.log` #21 | After player turn start | `Niche` RNG counter 62 vs 2 | yes, RNG state |
-
-Per field:
+can differ. Desyncs seen in real sessions were a player's energy after the first end-turn phase and
+the run's `Niche` RNG stream (once when leaving a modded Ancient event, once at turn start), both
+repairable.
 
 | Field | Fixable | How / why not |
 |---|---|---|
-| run RNG, player RNG (state + counter) | yes | `Rng.LoadFromSerializable` then replay local draws |
-| creature HP / max HP / block | yes | private setters via Harmony `PropertySetter`, events fire |
-| creature power amounts | yes | `PowerModel.SetAmount` |
-| creature power set (missing/extra power) | yes, gated | `ToMutable().ApplyInternal` / `RemoveInternal`; only if unchanged since checkpoint |
+| run RNG, player RNG (state + counter) | yes | `Rng.LoadFromSerializable`, then replay the local draws; skipped if the stream was reset since N |
 | player energy, stars, gold, max potions | yes | public setters, `AddToMaxPotionCount` |
-| potions | yes, gated | `AddPotionInternal` / `DiscardPotionInternal` |
-| relics (set and saved-property counters) | yes, gated | `AddRelicInternal` / `RemoveRelicInternal` / `SavedProperties.Fill` |
+| creature HP / max HP / block | yes | private setters via Harmony `PropertySetter` |
+| creature power amounts | yes | `PowerModel.SetAmount`; duplicate (instanced) powers matched one by one |
+| creature power set | yes, gated | `ApplyInternal` / `RemoveInternal`, then reordered to the host's order |
+| potions | yes, gated | `AddPotionInternal` / `DiscardPotionInternal`, reordered within the occupied slots |
+| relics (set and saved-property counters) | yes, gated | `AddRelicInternal` / `RemoveRelicInternal` / `SavedProperties.Fill`, then reordered |
 | relic grab bag | yes, gated | `RelicGrabBag.LoadFromSerializable` |
-| card piles (order and contents) | yes, gated | pool all combat cards, redistribute in host order (the card holding the host's combat ID for that slot first, else by value), create via `CardModel.FromSerializable`, drop leftovers |
-| combat card IDs (`NetCombatCardDb`) | yes | host sends its ID layout (`HsrCardIdLayoutMessage`) before the divergence message; cards are re-keyed to the host's IDs and the ID counter merged as `host + (now - base)` |
+| card piles (order and contents) | yes, gated | matched as described under "Card IDs"; created cards go into the combat scope |
+| combat card IDs (`NetCombatCardDb`) | yes | the host's layout, validated before any pile changes |
 | next choice ids, next reward ids | yes | `FastForwardChoiceIds` / `FastForwardRewardIds` |
-| creature set (different count or identity) | no | a monster that died or spawned on one side only; creating or deleting creatures mid-combat is not something this mod attempts |
+| orb order | yes, gated | `OrbQueue.Remove/Insert` of the existing orbs |
+| orb values | partly | only state an orb accumulates itself (Dark's evoke, Glass's passive); the rest comes from Focus, relics and other mods' hooks |
+| orb set (an orb missing or extra) | no | a created orb has no UI node (evoking it throws) and loses other mods' per-orb state |
+| card affliction / modified energy cost / keywords / enchantment | no | not writable; a mismatch left after the rebuild is reported as a skip |
+| creature set (different count or identity) | no | a monster that died or spawned on one side only |
 | turn number / turn phase | no | flow control; the peers would need to be in the same async action anyway |
-| orb queue | yes, gated | identity and order rebuilt via `OrbQueue.Remove/Insert`; Dark orb evoke value set via its private field; passive/evoke values otherwise derive from powers |
-| card affliction / modified energy cost / keywords | no | not carried in a way that can be written back |
 | last executed action id / hook id | n/a | informational |
 | anything outside `NetFullCombatState` | no | not in the checksum, so never detected in the first place |
 
-Card piles need the card IDs, not just the cards. A card play travels as "combat card 23", and the
-host silently cancels it if its card 23 is not in hand. The checksum only sees card values, so a
-rebuild that puts two identical Strikes back in each other's slots hashes clean and still breaks the
-next play of either. That happened in a real session (v0.1.0, 2026-10-09): after `hsr desync shuffle`
-was "healed", a Strike was cancelled on the host only, a monster died on the client only, and the
-creature-set mismatch got the client kicked. Since v0.2.0 every peer records its ID layout at every
-checkpoint, the host sends its layout ahead of the vanilla divergence message, and the client places
-and re-keys cards by ID. The new message changes the game's message numbering, which is why the
-version was bumped: the join check compares gameplay mods by `id-version`, so mixed builds refuse to
-connect instead of misreading each other's messages.
+## Known limitations
+
+- Whatever is not fixable above keeps diverging at every checkpoint, so the host kicks the client
+  after 7 strikes: the vanilla outcome, only later.
+- State that other mods keep per card or orb instance, outside `NetFullCombatState`, cannot be
+  carried over when a card is created.
+- An HP repair can set a creature to 0 HP without the game's death handling.
+- The snapshot does not say which potion slots the host's potions sit in, so potions are only
+  reordered within the client's occupied slots.
+- Replays written after a resync do not reproduce, since the resync is not a recorded action.
 
 ## Installation
 
@@ -162,42 +208,39 @@ dotnet run --project tools/PatchAudit -- . "<game data dir>/sts2.dll"
 
 ## Verifying it works
 
-1. Start a co-op run with all peers running the mod; `modloader.log` should list `HostStateResync`.
-2. Force a desync on the client, for example with a client-only gameplay mod that consumes the
-   `Niche` RNG, or by hand-editing a value.
-3. On the next checkpoint the host log shows `Client <id> diverged ... keeping it connected`, the
+1. Start a co-op run with every player on the same version. The game's log (`logs/godot.log` in
+   the game's user data folder) contains `HostStateResync initialized` once the patches are in.
+2. Drift one peer on purpose with a Debug build (`hsr desync <kind>`, see Testing).
+3. At the next checkpoint the host log shows `Client <id> diverged ... keeping it connected`, the
    client log shows `[HostStateResync] checksum #N: applied ... fix(es)`, and the checkpoint after
    that produces no divergence message.
 
 ## Testing
 
-Two layers, both driven from the in-game dev console (` key; debug commands are enabled whenever the game runs
-modded). The command class is `Testing/HsrConsoleCmd.cs`, discovered automatically like RelicStats' command.
-**Debug builds only** (`#if DEBUG`, same as RelicStats): `dotnet build -c Release` ships without `hsr`, so players
-cannot drift their own state on purpose; use `-c Debug` for testing.
+Both layers are driven from the in-game dev console (the key left of 1; debug commands are enabled
+whenever the game runs modded). The command is `Testing/HsrConsoleCmd.cs`, and its subcommands and
+drift kinds tab-complete. **Debug builds only** (`#if DEBUG`): Release builds ship without `hsr`.
 
-**Fake second player, no network: `hsr selftest`.** Works in any combat, singleplayer included. For every scenario
-it snapshots the live state as the "host truth", perturbs the live state the way a drifted client would look
-(energy, gold, run RNG, player RNG, enemy HP, block, power amount, pile order, extra card, potion, relic, orb,
-choice ids, two identical cards swapping places), snapshots that as the client's own checkpoint, runs
-`HostStateApplier.Apply` and asserts that the live state hashes back to the truth with the game's own
-`ChecksumTracker.GenerateChecksum` AND that every combat card ID is back in its slot (`CardIdLayout`). The checksum
-alone passed the broken v0.1.0 shuffle repair. A final scenario adds a lockstep action after the checkpoint (+1
-energy) and checks the three-way merge keeps it. `hsr selftest energy` runs one scenario; failures print a line diff
-of the two state dumps and of the two ID layouts. Subcommands and drift kinds tab-complete in the console.
+**Fake second player, no network: `hsr selftest`.** Singleplayer only, in any combat. For every
+drift kind it snapshots the live state as the "host truth", drifts the live state the way a
+diverged client would look, snapshots that as the client's own checkpoint, runs
+`HostStateApplier.Apply`, and asserts that the live state hashes back to the truth with the game's
+own `ChecksumTracker.GenerateChecksum`, that every combat card ID is back in its slot, and that
+every card in the piles belongs to the combat scope. The kinds: energy, gold, run RNG, player RNG,
+enemy HP, block, power amount, pile order, extra card, potion, relic, orb order, choice ids, two
+identical cards swapping places (`swapids`), a vanished card (`losecard`) and a vanished power
+(`losepower`). A kind whose precondition is missing (an empty draw pile, no free potion slot)
+reports SKIP. The full run adds `energy-delta`, a lockstep action after the checkpoint that the
+merge has to keep. `hsr selftest <kind>` runs one; failures print a line diff of the two state
+dumps and of the two ID layouts.
 
-**Real second player, local ENet: `tools/localmp.sh`.** The game ships a developer shortcut: `--fastmp=host_standard`
-hosts over ENet on `127.0.0.1:33771` without Steam, `--fastmp=join --clientId=1001` joins it. The script launches
-one host and N client instances of the installed game. Start a run, enter a fight, then on the client run
-`hsr desync rng` (or any kind from `hsr list`). The command is not networked, so only that peer drifts; at the next
-checkpoint the host log shows `diverged ... keeping it connected` and the client log shows
-`[HostStateResync] checksum #N: applied ...`. `hsr status` prints strike counters and the last resync result.
+**Real second player: `hsr desync <kind>`.** Drifts only the peer that runs it (the command is not
+networked), so the next checkpoint diverges for real; `hsr status` prints strike counts and the
+last resync result. `tools/localmp.sh` starts one host and N clients of the installed game over
+ENet on `127.0.0.1:33771` without Steam, using the game's `--fastmp=host_standard` /
+`--fastmp=join --clientId=1001` developer shortcut. It looks for the macOS install by default; set
+`STS2_APP` elsewhere.
 
-Status 2026-09-24: `hsr selftest` was run in a live fight through the STS2 MCP console passthrough
-(`GET localhost:15526/console?cmd=hsr%20selftest`) and passes every scenario; it caught one real bug on
-the first run (card matching used `SerializableCard.Equals`, which ignores the floor-added field that
-the checksum includes). The two-instance ENet path has not been run yet.
+## License
 
-Status 2026-10-09: a real two-player Steam session ran the v0.1.0 test plan. Combined drifts (energy, gold, rng,
-playerrng, hp, block) healed in one resync; the shuffle repair broke card IDs as described under "Which divergences
-are fixable". v0.2.0 (card IDs) builds but has not been run in game yet.
+[MIT](LICENSE)

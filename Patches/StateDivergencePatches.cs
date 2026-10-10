@@ -26,8 +26,8 @@ namespace HostStateResync.Patches;
 /// </list>
 /// This patch replaces step 2 and 3's tail: the client applies the host's snapshot to its own live state
 /// (<see cref="HostStateApplier"/>) and the host keeps the client connected unless it keeps diverging.
-/// Logging, Sentry reporting and RitsuLib's diagnostics hooks on <c>LogStateDivergence</c> are untouched because the
-/// original private method is still invoked.
+/// Logging, the echo and RitsuLib's diagnostics hooks on <c>LogStateDivergence</c> are untouched, because the original
+/// private method is still invoked. (Its Sentry report does not go out: the game turns Sentry off when it runs modded.)
 /// </summary>
 [HarmonyPatch(typeof(ChecksumTracker), "OnReceivedStateDivergenceMessage")]
 public static class OnReceivedStateDivergenceMessagePatch
@@ -112,7 +112,7 @@ public static class OnReceivedStateDivergenceMessagePatch
                 }
                 else
                 {
-                    // Vanilla logging, Sentry report, echo to host, StateDiverged event. RitsuLib hooks here too.
+                    // Vanilla logging, echo to host, StateDiverged event. RitsuLib hooks here too.
                     LogStateDivergenceMethod!.Invoke(__instance, new[] { local!, message, senderId, index });
                 }
             }
